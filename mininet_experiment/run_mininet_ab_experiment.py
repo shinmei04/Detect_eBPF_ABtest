@@ -30,6 +30,7 @@ if str(MININET_ROOT) not in sys.path:
     sys.path.insert(0, str(MININET_ROOT))
 
 from pcap_to_features import build_features_from_pcap
+from plot_mininet_results import create_overview_dashboard
 from src.paper_reproduction_detector import (
     PAPER_FEATURES,
     PaperDetectorConfig,
@@ -106,6 +107,7 @@ def main() -> None:
                 output_dir / "suspicious_score_distribution_stat_matched.png",
             )
         write_summary(args, metrics_by_scenario, output_dir / "mininet_ab_summary.md")
+        create_overview_dashboard(output_dir, output_dir / "mininet_ab_overview.png")
 
 
 def assert_mininet_environment() -> None:

@@ -135,11 +135,21 @@ results_mininet_ab/
     metrics.json
     confusion_matrix.png
   mininet_ab_summary.md
+  mininet_ab_overview.png
   metrics_comparison.csv
   metrics_comparison.png
   feature_distribution_original_like.png
   feature_distribution_stat_matched.png
   suspicious_score_distribution_stat_matched.png
+```
+
+`mininet_ab_overview.png` は、F1/FPR/FNR、confusion matrix、detection delay、特徴量差分、suspicious score推移を1枚にまとめた概要図です。実験スクリプト完了時に自動生成されます。
+
+既存の結果ディレクトリから概要図だけ作り直す場合:
+
+```bash
+.venv/bin/python mininet_experiment/plot_mininet_results.py \
+  --results-dir results_mininet_ab
 ```
 
 `results_mininet_ab/`、`*.pcap`、`*.log` は `.gitignore` で除外しています。GitHubには実験コードとREADMEだけをpushし、実験結果は必要に応じてsummaryだけ別途まとめる想定です。
