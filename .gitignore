@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+results/
+results_*/
+results_mininet_ab/
+*.pcap
+*.log
+*.tmp
+
+.mininet_history
