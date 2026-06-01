@@ -183,6 +183,7 @@ WSL2 Ubuntu上で実行してください。
 ```bash
 sudo .venv/bin/python mininet_experiment/run_throughput_impact_experiment.py \
   --duration-sec 60 \
+  --attack-start-sec 20 \
   --bucket-ms 25 \
   --period-ms 1000 \
   --burst-ms 200 \
@@ -198,6 +199,8 @@ sudo .venv/bin/python mininet_experiment/run_throughput_impact_experiment.py \
 - `random_microburst_only`: TCP + random microburst
 - `original_like_ldos`: TCP + periodic LDoS
 - `stat_matched_ldos`: TCP + stat-matched periodic LDoS
+
+`--attack-start-sec` より前からTCPを開始し、攻撃前baseline区間と攻撃中区間を分けて集計します。`normalized_throughput` と `throughput_degradation` は、攻撃中区間の `no_attack` throughputを基準に計算します。
 
 主な出力:
 
@@ -225,6 +228,32 @@ macOSなどMininetを実行できない環境で、出力生成だけ確認す�
   --synthetic-test \
   --duration-sec 60 \
   --output-dir results_throughput
+```
+
+### LDoS parameter sweep
+
+`original_like_ldos` でTCP throughput degradationが大きくなる `burst_pkts_per_bucket` と `payload_size` を探索し、最大degradationの条件を `stat_matched_ldos` に適用します。detectorロジックは変更しません。
+
+```bash
+sudo .venv/bin/python mininet_experiment/run_ldos_parameter_sweep.py \
+  --duration-sec 60 \
+  --attack-start-sec 20 \
+  --bucket-ms 25 \
+  --period-ms 1000 \
+  --burst-ms 200 \
+  --burst-pkts-per-bucket-values 10 20 30 40 \
+  --payload-size-values 80 200 400 800 \
+  --seed 1 \
+  --output-dir results_throughput_sweep
+```
+
+主な出力:
+
+```text
+results_throughput_sweep/
+  parameter_sweep_summary.csv
+  parameter_sweep_summary.md
+  degradation_heatmap.png
 ```
 
 ## 注意

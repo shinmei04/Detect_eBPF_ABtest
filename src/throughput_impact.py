@@ -61,11 +61,13 @@ def enrich_window_predictions(
     scenario: str,
     predictions: pd.DataFrame,
     throughput: pd.DataFrame,
+    attack_start_sec: float = 0.0,
 ) -> pd.DataFrame:
     """Add throughput, abnormal-direction margins, and EMA update flags."""
     frame = predictions.copy()
     if "scenario" not in frame.columns:
         frame["scenario"] = scenario
+    frame["attack_start_sec"] = float(attack_start_sec)
     if "window_index" not in frame.columns:
         frame["window_index"] = np.arange(len(frame), dtype=int)
     frame["true_label"] = true_labels(frame)
@@ -128,6 +130,7 @@ def build_no_attack_windows(
     window_sec: float,
     step_sec: float,
     duration_sec: float,
+    attack_start_sec: float = 0.0,
 ) -> pd.DataFrame:
     """Create benign placeholder windows for TCP-only no-UDP scenarios."""
     starts = np.arange(0.0, max(duration_sec - window_sec + 1e-9, 0.0) + 1e-9, step_sec)
@@ -136,6 +139,7 @@ def build_no_attack_windows(
         end = start + window_sec
         row: dict[str, Any] = {
             "scenario": scenario,
+            "attack_start_sec": float(attack_start_sec),
             "window_index": index,
             "window_start_sec": start,
             "window_end_sec": end,
@@ -193,32 +197,50 @@ def throughput_for_window(throughput: pd.DataFrame, start_sec: float, end_sec: f
     return weighted / total_weight if total_weight > 0 else 0.0
 
 
-def build_throughput_metrics(timeseries: pd.DataFrame, evaluation_start_sec: float = 0.0) -> pd.DataFrame:
-    """Compute throughput metrics normalized to the no_attack baseline."""
+def build_throughput_metrics(timeseries: pd.DataFrame, attack_start_sec: float = 0.0) -> pd.DataFrame:
+    """Compute pre-attack and attack-period throughput metrics.
+
+    The main normalized throughput/degradation columns use the attack/evaluation
+    period, normalized by the ``no_attack`` throughput in that same period.
+    """
     rows = []
     for scenario in THROUGHPUT_SCENARIOS:
-        values = timeseries[
-            (timeseries["scenario"] == scenario) & (timeseries["end_sec"] > evaluation_start_sec)
-        ]["tcp_throughput_bps"]
+        frame = timeseries[timeseries["scenario"] == scenario]
+        pre_values = frame[frame["end_sec"] <= attack_start_sec]["tcp_throughput_bps"]
+        attack_values = frame[frame["end_sec"] > attack_start_sec]["tcp_throughput_bps"]
+        full_values = frame["tcp_throughput_bps"]
+        attack_avg_bps = float(attack_values.mean()) if len(attack_values) else 0.0
+        pre_avg_bps = float(pre_values.mean()) if len(pre_values) else 0.0
         rows.append(
             {
                 "scenario": scenario,
-                "tcp_avg_throughput_bps": float(values.mean()) if len(values) else 0.0,
-                "tcp_avg_throughput_mbps": float(values.mean() / 1_000_000.0) if len(values) else 0.0,
-                "sample_count": int(len(values)),
+                "attack_start_sec": float(attack_start_sec),
+                "pre_attack_tcp_avg_throughput_bps": pre_avg_bps,
+                "pre_attack_tcp_avg_throughput_mbps": pre_avg_bps / 1_000_000.0,
+                "attack_tcp_avg_throughput_bps": attack_avg_bps,
+                "attack_tcp_avg_throughput_mbps": attack_avg_bps / 1_000_000.0,
+                "full_tcp_avg_throughput_bps": float(full_values.mean()) if len(full_values) else 0.0,
+                "full_tcp_avg_throughput_mbps": float(full_values.mean() / 1_000_000.0) if len(full_values) else 0.0,
+                "tcp_avg_throughput_bps": attack_avg_bps,
+                "tcp_avg_throughput_mbps": attack_avg_bps / 1_000_000.0,
+                "pre_attack_sample_count": int(len(pre_values)),
+                "attack_sample_count": int(len(attack_values)),
+                "sample_count": int(len(attack_values)),
             }
         )
     metrics = pd.DataFrame(rows)
-    baseline = metrics.loc[metrics["scenario"] == "no_attack", "tcp_avg_throughput_bps"]
+    baseline = metrics.loc[metrics["scenario"] == "no_attack", "attack_tcp_avg_throughput_bps"]
     baseline_value = float(baseline.iloc[0]) if not baseline.empty and float(baseline.iloc[0]) > 0 else 0.0
-    metrics["normalized_throughput"] = metrics["tcp_avg_throughput_bps"].apply(
+    metrics["baseline_attack_tcp_avg_throughput_bps"] = baseline_value
+    metrics["baseline_attack_tcp_avg_throughput_mbps"] = baseline_value / 1_000_000.0
+    metrics["normalized_throughput"] = metrics["attack_tcp_avg_throughput_bps"].apply(
         lambda value: safe_divide(float(value), baseline_value)
     )
     metrics["throughput_degradation"] = 1.0 - metrics["normalized_throughput"]
     return metrics
 
 
-def build_detector_metrics(window_log: pd.DataFrame) -> pd.DataFrame:
+def build_detector_metrics(window_log: pd.DataFrame, attack_start_sec: float = 0.0) -> pd.DataFrame:
     """Compute detector metrics per scenario where labels are available."""
     rows = []
     for scenario in THROUGHPUT_SCENARIOS:
@@ -238,12 +260,20 @@ def build_detector_metrics(window_log: pd.DataFrame) -> pd.DataFrame:
         first = detected_attack_windows.sort_values("window_start_sec").head(1)
         delay = None
         first_window_index = None
+        first_attack_window_ordinal = None
         if not first.empty:
             delay = float(first.iloc[0]["window_end_sec"])
             first_window_index = int(first.iloc[0]["window_index"])
+        delay_from_attack_start = None
+        if not first.empty:
+            first_start = float(first.iloc[0]["window_start_sec"])
+            delay_from_attack_start = max(0.0, first_start - attack_start_sec)
+            ordered_attack_indices = list(attack_windows.sort_values("window_start_sec").index)
+            first_attack_window_ordinal = ordered_attack_indices.index(first.index[0]) + 1
         rows.append(
             {
                 "scenario": scenario,
+                "attack_start_sec": float(attack_start_sec),
                 "accuracy": float(accuracy_score(y_true, y_pred)) if len(evaluated) else 0.0,
                 "precision": float(precision_score(y_true, y_pred, zero_division=0)) if len(evaluated) else 0.0,
                 "recall": float(recall_score(y_true, y_pred, zero_division=0)) if len(evaluated) else 0.0,
@@ -255,7 +285,9 @@ def build_detector_metrics(window_log: pd.DataFrame) -> pd.DataFrame:
                 "fn": int(fn),
                 "tp": int(tp),
                 "detection_delay_sec": delay,
+                "detection_delay_from_attack_start_sec": delay_from_attack_start,
                 "first_detected_window_index": first_window_index,
+                "first_detected_attack_window_ordinal": first_attack_window_ordinal,
                 "attack_window_count": int(len(attack_windows)),
                 "detected_attack_window_count": int(len(detected_attack_windows)),
                 "missed_attack_window_count": int(len(missed_attack_windows)),
@@ -309,6 +341,7 @@ def write_throughput_outputs(
     detector_metrics: pd.DataFrame,
     confusion_matrices: pd.DataFrame,
     missed_harmful: pd.DataFrame,
+    attack_start_sec: float = 0.0,
     notes: list[str] | None = None,
 ) -> None:
     """Write all requested CSV, PNG, and Markdown throughput artifacts."""
@@ -323,14 +356,15 @@ def write_throughput_outputs(
     plot_throughput_comparison(throughput_metrics, output_dir / "throughput_comparison.png")
     plot_normalized_throughput(throughput_metrics, output_dir / "normalized_throughput_comparison.png")
     plot_detector_vs_throughput(throughput_metrics, detector_metrics, output_dir / "detector_vs_throughput_summary.png")
-    plot_tcp_timeseries(timeseries, output_dir / "tcp_throughput_timeseries_by_scenario.png")
+    plot_tcp_timeseries(timeseries, output_dir / "tcp_throughput_timeseries_by_scenario.png", attack_start_sec)
     plot_degradation(throughput_metrics, output_dir / "throughput_degradation_comparison.png")
     plot_stat_matched_detection_timeline(
         window_log,
         output_dir / "stat_matched_detection_vs_throughput_timeline.png",
+        attack_start_sec,
     )
     (output_dir / "throughput_summary.md").write_text(
-        build_summary(throughput_metrics, detector_metrics, missed_harmful, notes or []),
+        build_summary(throughput_metrics, detector_metrics, missed_harmful, attack_start_sec, notes or []),
         encoding="utf-8",
     )
 
@@ -384,7 +418,7 @@ def plot_detector_vs_throughput(
     plt.close(fig)
 
 
-def plot_tcp_timeseries(timeseries: pd.DataFrame, output_path: Path) -> None:
+def plot_tcp_timeseries(timeseries: pd.DataFrame, output_path: Path, attack_start_sec: float = 0.0) -> None:
     """Plot TCP throughput time series for all scenarios."""
     fig, axis = plt.subplots(figsize=(11, 5.5), constrained_layout=True)
     for scenario in THROUGHPUT_SCENARIOS:
@@ -393,7 +427,7 @@ def plot_tcp_timeseries(timeseries: pd.DataFrame, output_path: Path) -> None:
             continue
         mid = (frame["start_sec"] + frame["end_sec"]) / 2.0
         axis.plot(mid, frame["tcp_throughput_mbps"], linewidth=1.8, label=scenario)
-    axis.axvline(0, color="black", linestyle="--", linewidth=1, label="evaluation start")
+    axis.axvline(attack_start_sec, color="black", linestyle="--", linewidth=1, label="attack start")
     axis.set_title("TCP Throughput Time Series by Scenario")
     axis.set_xlabel("time (sec)")
     axis.set_ylabel("TCP throughput (Mbps)")
@@ -416,7 +450,11 @@ def plot_degradation(metrics: pd.DataFrame, output_path: Path) -> None:
     plt.close(fig)
 
 
-def plot_stat_matched_detection_timeline(window_log: pd.DataFrame, output_path: Path) -> None:
+def plot_stat_matched_detection_timeline(
+    window_log: pd.DataFrame,
+    output_path: Path,
+    attack_start_sec: float = 0.0,
+) -> None:
     """Plot stat_matched TCP throughput and detector predictions on one timeline."""
     frame = window_log[window_log["scenario"] == "stat_matched_ldos"].copy()
     fig, axis = plt.subplots(figsize=(11, 5.5), constrained_layout=True)
@@ -444,7 +482,7 @@ def plot_stat_matched_detection_timeline(window_log: pd.DataFrame, output_path: 
             s=32,
             label="detected attack window",
         )
-        axis.axvline(0, color="black", linestyle="--", linewidth=1, label="attack/evaluation start")
+        axis.axvline(attack_start_sec, color="black", linestyle="--", linewidth=1, label="attack start")
         axis.set_title("stat_matched_ldos: Detection vs TCP Throughput")
         axis.set_xlabel("time (sec)")
         axis.set_ylabel("TCP throughput (Mbps)")
@@ -458,12 +496,14 @@ def build_summary(
     throughput_metrics: pd.DataFrame,
     detector_metrics: pd.DataFrame,
     missed_harmful: pd.DataFrame,
+    attack_start_sec: float,
     notes: list[str],
 ) -> str:
     """Build Markdown summary for throughput-impact results."""
     throughput_rows = [
         [
             row.scenario,
+            f"{row.pre_attack_tcp_avg_throughput_mbps:.3f}",
             f"{row.tcp_avg_throughput_mbps:.3f}",
             f"{row.normalized_throughput:.3f}",
             f"{row.throughput_degradation:.3f}",
@@ -508,6 +548,7 @@ def build_summary(
         "",
         "## 2. 実験条件",
         "",
+        f"- attack_start_sec: {attack_start_sec:.3f}",
         "- `no_attack`: h1 -> h2 のTCP通信のみ",
         "- `random_microburst_only`: TCP通信 + h4 -> h2 random microburst",
         "- `original_like_ldos`: TCP通信 + h3 -> h2 periodic LDoS",
@@ -515,7 +556,10 @@ def build_summary(
         "",
         "## 3-5. TCP平均スループット / normalized throughput / degradation",
         "",
-        markdown_table(["scenario", "avg TCP Mbps", "normalized throughput", "degradation"], throughput_rows),
+        markdown_table(
+            ["scenario", "pre-attack TCP Mbps", "attack-period TCP Mbps", "normalized throughput", "degradation"],
+            throughput_rows,
+        ),
         "",
         "## 6. detectorのRecall/FNR/F1",
         "",

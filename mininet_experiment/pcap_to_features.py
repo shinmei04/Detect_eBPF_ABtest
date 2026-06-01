@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step-sec", type=float, default=1.0)
     parser.add_argument("--duration-sec", type=float)
     parser.add_argument("--attack-start-sec", type=float)
+    parser.add_argument("--time-origin-sec", type=float)
     parser.add_argument("--dst-port", type=int, default=5001)
     return parser.parse_args()
 
@@ -58,6 +59,7 @@ def main() -> None:
         step_sec=args.step_sec,
         duration_sec=args.duration_sec,
         attack_start_sec=args.attack_start_sec,
+        time_origin_sec=args.time_origin_sec,
         dst_port=args.dst_port,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -74,6 +76,7 @@ def build_features_from_pcap(
     step_sec: float,
     duration_sec: float | None,
     attack_start_sec: float | None,
+    time_origin_sec: float | None = None,
     dst_port: int = 5001,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Parse pcap and return ``(features, packets)`` DataFrames."""
@@ -81,9 +84,12 @@ def build_features_from_pcap(
     if packets.empty:
         raise RuntimeError(f"no UDP packets for dst port {dst_port} found in {pcap_path}")
 
-    first_timestamp = float(packets["timestamp"].min())
+    first_timestamp = float(packets["timestamp"].min()) if time_origin_sec is None else float(time_origin_sec)
     packets = packets.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
     packets["timestamp_sec"] = packets["timestamp"] - first_timestamp
+    packets = packets[packets["timestamp_sec"] >= 0].copy()
+    if packets.empty:
+        raise RuntimeError(f"no UDP packets at or after time origin in {pcap_path}")
     packets["bucket_index"] = np.floor(packets["timestamp_sec"] / (bucket_ms / 1000.0)).astype(int)
     packets["flow_id"] = (
         packets["src_ip"].astype(str)

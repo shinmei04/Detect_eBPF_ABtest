@@ -54,6 +54,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--burst-pkts-per-bucket", type=int, default=10)
     parser.add_argument("--payload-size", type=int, default=80)
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--attack-start-sec",
+        type=float,
+        default=20.0,
+        help="Start TCP at t=0, then start UDP attack/microburst traffic after this many seconds.",
+    )
     parser.add_argument("--window-sec", type=float, default=4.0)
     parser.add_argument("--step-sec", type=float, default=1.0)
     parser.add_argument("--warmup-windows", type=int, default=20)
@@ -72,6 +78,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Run throughput-impact experiment and write output artifacts."""
     args = parse_args()
+    validate_args(args)
     output_dir = ensure_dir(args.output_dir)
     if args.synthetic_test:
         run_synthetic_test(args, output_dir)
@@ -102,7 +109,23 @@ def main() -> None:
             network.stop()
         cleanup()
 
-    write_aggregate_outputs(output_dir, timeseries_frames, window_frames, notes)
+    write_aggregate_outputs(
+        output_dir,
+        timeseries_frames,
+        window_frames,
+        notes=notes,
+        attack_start_sec=args.attack_start_sec,
+    )
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    """Validate throughput experiment arguments."""
+    if args.duration_sec <= 0:
+        raise SystemExit("--duration-sec must be positive")
+    if args.attack_start_sec < 0:
+        raise SystemExit("--attack-start-sec must be non-negative")
+    if args.attack_start_sec >= args.duration_sec:
+        raise SystemExit("--attack-start-sec must be smaller than --duration-sec")
 
 
 def assert_mininet_environment() -> None:
@@ -142,6 +165,7 @@ def run_one_scenario(
     iperf_client_pid = ""
     tcpdump_pid = ""
     sink_pid = ""
+    experiment_start_wall = 0.0
     try:
         iperf_server_pid = start_background(h2, ["iperf3", "-s", "-p", str(IPERF_PORT)], scenario_dir / "iperf_server.log")
         time.sleep(0.5)
@@ -180,7 +204,9 @@ def run_one_scenario(
             ],
             iperf_json,
         )
-        time.sleep(0.5)
+        experiment_start_wall = time.time()
+        if has_udp and args.attack_start_sec > 0:
+            time.sleep(args.attack_start_sec)
         run_udp_for_scenario(h3, h4, scenario, args, send_log_dir, scenario_dir)
         wait_for_process(h1, iperf_client_pid)
         time.sleep(0.5)
@@ -192,7 +218,7 @@ def run_one_scenario(
 
     throughput = parse_iperf_json(iperf_json, scenario)
     throughput.to_csv(scenario_dir / "tcp_throughput_timeseries.csv", index=False)
-    windows = build_windows_for_scenario(scenario, args, pcap_path, throughput, scenario_dir)
+    windows = build_windows_for_scenario(scenario, args, pcap_path, throughput, scenario_dir, experiment_start_wall)
     windows.to_csv(scenario_dir / "window_detailed_log.csv", index=False)
     return throughput, windows
 
@@ -216,6 +242,7 @@ def run_udp_for_scenario(
             send_log_dir / "random_microburst_send_log.csv",
             scenario_dir / "random_microburst_stdout.log",
             src_port=40004,
+            duration_sec=max(0.0, args.duration_sec - args.attack_start_sec),
             extra=["--seed", str(args.seed)],
         )
     elif scenario in {"original_like_ldos", "stat_matched_ldos"}:
@@ -226,6 +253,7 @@ def run_udp_for_scenario(
             send_log_dir / f"{scenario}_send_log.csv",
             scenario_dir / f"{scenario}_stdout.log",
             src_port=40003,
+            duration_sec=max(0.0, args.duration_sec - args.attack_start_sec),
             extra=[],
         )
     else:
@@ -238,12 +266,20 @@ def build_windows_for_scenario(
     pcap_path: Path,
     throughput: pd.DataFrame,
     scenario_dir: Path,
+    experiment_start_wall: float,
 ) -> pd.DataFrame:
     """Build enriched detector/throughput windows for one scenario."""
     if scenario == "no_attack":
-        return build_no_attack_windows(scenario, throughput, args.window_sec, args.step_sec, args.duration_sec)
+        return build_no_attack_windows(
+            scenario,
+            throughput,
+            args.window_sec,
+            args.step_sec,
+            args.duration_sec,
+            args.attack_start_sec,
+        )
 
-    attack_start_sec = 0.0 if scenario in {"original_like_ldos", "stat_matched_ldos"} else None
+    attack_start_sec = args.attack_start_sec if scenario in {"original_like_ldos", "stat_matched_ldos"} else None
     features, packets = build_features_from_pcap(
         pcap_path=pcap_path,
         bucket_ms=args.bucket_ms,
@@ -251,14 +287,16 @@ def build_windows_for_scenario(
         step_sec=args.step_sec,
         duration_sec=args.duration_sec,
         attack_start_sec=attack_start_sec,
+        time_origin_sec=experiment_start_wall if experiment_start_wall > 0 else None,
         dst_port=UDP_PORT,
     )
     if scenario == "random_microburst_only":
         features["label"] = "benign"
         features["target"] = 0
     else:
-        features["label"] = "attack"
+        features["label"] = np.where(features["window_end_sec"] > args.attack_start_sec, "attack", "benign")
         features["target"] = 1
+        features["target"] = (features["label"] == "attack").astype(int)
     features.insert(0, "scenario", scenario)
     features.insert(1, "seed", args.seed)
     features["stream_id"] = f"{scenario}_seed_{args.seed}"
@@ -275,7 +313,7 @@ def build_windows_for_scenario(
     )
     predictions = run_paper_detector_by_seed(features, detector_config)
     predictions.to_csv(scenario_dir / "predictions.csv", index=False)
-    return enrich_window_predictions(scenario, predictions, throughput)
+    return enrich_window_predictions(scenario, predictions, throughput, args.attack_start_sec)
 
 
 def write_aggregate_outputs(
@@ -283,12 +321,13 @@ def write_aggregate_outputs(
     timeseries_frames: list[pd.DataFrame],
     window_frames: list[pd.DataFrame],
     notes: list[str] | None = None,
+    attack_start_sec: float = 0.0,
 ) -> None:
     """Write aggregate throughput-impact outputs."""
     timeseries = pd.concat(timeseries_frames, ignore_index=True) if timeseries_frames else pd.DataFrame()
     window_log = pd.concat(window_frames, ignore_index=True) if window_frames else pd.DataFrame()
-    throughput_metrics = build_throughput_metrics(timeseries)
-    detector_metrics = build_detector_metrics(window_log)
+    throughput_metrics = build_throughput_metrics(timeseries, attack_start_sec)
+    detector_metrics = build_detector_metrics(window_log, attack_start_sec)
     confusion_matrices = build_confusion_matrices(detector_metrics)
     missed_harmful = build_missed_harmful_windows(window_log)
     write_throughput_outputs(
@@ -299,6 +338,7 @@ def write_aggregate_outputs(
         detector_metrics=detector_metrics,
         confusion_matrices=confusion_matrices,
         missed_harmful=missed_harmful,
+        attack_start_sec=attack_start_sec,
         notes=notes or [],
     )
 
@@ -314,7 +354,7 @@ def run_synthetic_test(args: argparse.Namespace, output_dir: Path) -> None:
         "stat_matched_ldos": 56.0,
     }
     for scenario in args.scenarios:
-        timeseries = synthetic_throughput(scenario, args.duration_sec, synthetic_mbps[scenario])
+        timeseries = synthetic_throughput(scenario, args.duration_sec, args.attack_start_sec, synthetic_mbps[scenario])
         timeseries_frames.append(timeseries)
         windows = synthetic_windows(scenario, args, timeseries)
         window_frames.append(windows)
@@ -323,14 +363,21 @@ def run_synthetic_test(args: argparse.Namespace, output_dir: Path) -> None:
         timeseries_frames,
         window_frames,
         notes=["synthetic-test mode: Mininet was not executed; outputs are smoke-test artifacts."],
+        attack_start_sec=args.attack_start_sec,
     )
 
 
-def synthetic_throughput(scenario: str, duration_sec: float, base_mbps: float) -> pd.DataFrame:
+def synthetic_throughput(
+    scenario: str,
+    duration_sec: float,
+    attack_start_sec: float,
+    attack_mbps: float,
+) -> pd.DataFrame:
     """Build deterministic synthetic iperf-like throughput."""
     rows = []
     for index in range(int(duration_sec)):
         wave = 2.0 * np.sin(index / 4.0)
+        base_mbps = 90.0 if index < attack_start_sec else attack_mbps
         rows.append(
             {
                 "scenario": scenario,
@@ -347,21 +394,29 @@ def synthetic_throughput(scenario: str, duration_sec: float, base_mbps: float) -
 def synthetic_windows(scenario: str, args: argparse.Namespace, throughput: pd.DataFrame) -> pd.DataFrame:
     """Build deterministic synthetic window logs matching requested output columns."""
     if scenario == "no_attack":
-        return build_no_attack_windows(scenario, throughput, args.window_sec, args.step_sec, args.duration_sec)
+        return build_no_attack_windows(
+            scenario,
+            throughput,
+            args.window_sec,
+            args.step_sec,
+            args.duration_sec,
+            args.attack_start_sec,
+        )
     starts = np.arange(0.0, max(args.duration_sec - args.window_sec + 1e-9, 0.0) + 1e-9, args.step_sec)
     rows = []
     for index, start in enumerate(starts):
-        is_attack = scenario in {"original_like_ldos", "stat_matched_ldos"}
+        is_attack = scenario in {"original_like_ldos", "stat_matched_ldos"} and start + args.window_sec > args.attack_start_sec
         if scenario == "original_like_ldos":
-            score = 2 if index >= args.warmup_windows else 0
+            score = 2 if is_attack and index >= args.warmup_windows else 0
         elif scenario == "stat_matched_ldos":
-            score = 2 if index in {args.warmup_windows + 5, args.warmup_windows + 12} else 1
-            if index < args.warmup_windows:
+            score = 2 if is_attack and index in {args.warmup_windows + 5, args.warmup_windows + 12} else 1
+            if not is_attack or index < args.warmup_windows:
                 score = 0
         else:
             score = 0
         row: dict[str, Any] = {
             "scenario": scenario,
+            "attack_start_sec": args.attack_start_sec,
             "window_index": index,
             "window_start_sec": start,
             "window_end_sec": start + args.window_sec,
@@ -408,6 +463,7 @@ def run_generator(
     send_log: Path,
     stdout_log: Path,
     src_port: int,
+    duration_sec: float,
     extra: list[str],
 ) -> None:
     """Run one UDP traffic generator synchronously inside a Mininet host."""
@@ -421,7 +477,7 @@ def run_generator(
         "--src-port",
         str(src_port),
         "--duration-sec",
-        str(args.duration_sec),
+        str(duration_sec),
         "--bucket-ms",
         str(args.bucket_ms),
         "--payload-size",
