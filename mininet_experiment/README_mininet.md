@@ -174,6 +174,59 @@ results_mininet_ab/
 - FPR増加量
 - FNR増加量
 
+## TCP throughput impact実験
+
+検知を見逃されたstat-matched LDoSが、実際にTCPスループットを低下させるかを確認する追加実験です。既存の検知ロジックは変更せず、4特徴量、EMA動的しきい値、`suspicious_score >= 2` のまま使います。Goertzel、Sliding DFT、周期性特徴量は使いません。
+
+WSL2 Ubuntu上で実行してください。
+
+```bash
+sudo .venv/bin/python mininet_experiment/run_throughput_impact_experiment.py \
+  --duration-sec 60 \
+  --bucket-ms 25 \
+  --period-ms 1000 \
+  --burst-ms 200 \
+  --burst-pkts-per-bucket 10 \
+  --payload-size 80 \
+  --seed 1 \
+  --output-dir results_throughput
+```
+
+比較するscenario:
+
+- `no_attack`: TCPのみ
+- `random_microburst_only`: TCP + random microburst
+- `original_like_ldos`: TCP + periodic LDoS
+- `stat_matched_ldos`: TCP + stat-matched periodic LDoS
+
+主な出力:
+
+```text
+results_throughput/
+  throughput_summary.md
+  throughput_metrics.csv
+  tcp_throughput_timeseries.csv
+  window_detailed_log.csv
+  detector_metrics.csv
+  confusion_matrices.csv
+  missed_harmful_windows.csv
+  throughput_comparison.png
+  normalized_throughput_comparison.png
+  detector_vs_throughput_summary.png
+  tcp_throughput_timeseries_by_scenario.png
+  throughput_degradation_comparison.png
+  stat_matched_detection_vs_throughput_timeline.png
+```
+
+macOSなどMininetを実行できない環境で、出力生成だけ確認する場合は以下を使います。この結果は実験結果としては使わず、CLIとグラフ生成のスモークテスト用です。
+
+```bash
+.venv/bin/python mininet_experiment/run_throughput_impact_experiment.py \
+  --synthetic-test \
+  --duration-sec 60 \
+  --output-dir results_throughput
+```
+
 ## 注意
 
 - この実験は元論文の完全再現ではありません。
