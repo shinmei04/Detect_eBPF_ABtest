@@ -65,6 +65,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-windows", type=int, default=20)
     parser.add_argument("--score-threshold", type=int, default=2)
     parser.add_argument("--min-packets-for-detection", type=int, default=10)
+    parser.add_argument(
+        "--detector-profile",
+        choices=["current", "phase3"],
+        default="current",
+        help=(
+            "current keeps the throughput-impact traffic timing; phase3 adds a UDP benign baseline "
+            "before attack and uses Phase3-compatible attack labels."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("results_throughput"))
     parser.add_argument("--scenarios", nargs="+", choices=THROUGHPUT_SCENARIOS, default=THROUGHPUT_SCENARIOS)
     parser.add_argument(
@@ -95,7 +104,7 @@ def main() -> None:
     network: Mininet | None = None
     timeseries_frames: list[pd.DataFrame] = []
     window_frames: list[pd.DataFrame] = []
-    notes: list[str] = []
+    notes: list[str] = [f"detector_profile: {args.detector_profile}"]
     try:
         network = Mininet(topo=MinimalABTopo(), link=TCLink, autoSetMacs=True, autoStaticArp=True)
         network.start()
@@ -205,7 +214,11 @@ def run_one_scenario(
             iperf_json,
         )
         experiment_start_wall = time.time()
-        if has_udp and args.attack_start_sec > 0:
+        if (
+            has_udp
+            and args.attack_start_sec > 0
+            and (args.detector_profile == "current" or scenario == "random_microburst_only")
+        ):
             time.sleep(args.attack_start_sec)
         run_udp_for_scenario(h3, h4, scenario, args, send_log_dir, scenario_dir)
         wait_for_process(h1, iperf_client_pid)
@@ -234,6 +247,9 @@ def run_udp_for_scenario(
     """Run the UDP generator required by a scenario."""
     if scenario == "no_attack":
         return
+    if args.detector_profile == "phase3" and scenario in {"original_like_ldos", "stat_matched_ldos"}:
+        run_phase3_baseline_then_attack(h3, h4, scenario, args, send_log_dir, scenario_dir)
+        return
     if scenario == "random_microburst_only":
         run_generator(
             h4,
@@ -258,6 +274,52 @@ def run_udp_for_scenario(
         )
     else:
         raise ValueError(f"unknown scenario: {scenario}")
+
+
+def run_phase3_baseline_then_attack(
+    h3: Any,
+    h4: Any,
+    scenario: str,
+    args: argparse.Namespace,
+    send_log_dir: Path,
+    scenario_dir: Path,
+) -> None:
+    """Run Phase3-compatible UDP baseline first, then periodic LDoS attack."""
+    if scenario == "original_like_ldos":
+        run_generator(
+            h4,
+            "send_normal_benign.py",
+            args,
+            send_log_dir / "normal_benign_baseline_send_log.csv",
+            scenario_dir / "normal_benign_baseline_stdout.log",
+            src_port=40004,
+            duration_sec=args.attack_start_sec,
+            extra=["--seed", str(args.seed)],
+        )
+    elif scenario == "stat_matched_ldos":
+        run_generator(
+            h4,
+            "send_random_microburst.py",
+            args,
+            send_log_dir / "random_microburst_baseline_send_log.csv",
+            scenario_dir / "random_microburst_baseline_stdout.log",
+            src_port=40004,
+            duration_sec=args.attack_start_sec,
+            extra=["--seed", str(args.seed)],
+        )
+    else:
+        raise ValueError(f"phase3 profile does not support scenario: {scenario}")
+
+    run_generator(
+        h3,
+        "send_periodic_ldos.py",
+        args,
+        send_log_dir / f"{scenario}_attack_send_log.csv",
+        scenario_dir / f"{scenario}_attack_stdout.log",
+        src_port=40003,
+        duration_sec=max(0.0, args.duration_sec - args.attack_start_sec),
+        extra=[],
+    )
 
 
 def build_windows_for_scenario(
@@ -294,8 +356,11 @@ def build_windows_for_scenario(
         features["label"] = "benign"
         features["target"] = 0
     else:
-        features["label"] = np.where(features["window_end_sec"] > args.attack_start_sec, "attack", "benign")
-        features["target"] = 1
+        features["label"] = np.where(
+            attack_label_mask(features, args.attack_start_sec, args.detector_profile),
+            "attack",
+            "benign",
+        )
         features["target"] = (features["label"] == "attack").astype(int)
     features.insert(0, "scenario", scenario)
     features.insert(1, "seed", args.seed)
@@ -314,6 +379,13 @@ def build_windows_for_scenario(
     predictions = run_paper_detector_by_seed(features, detector_config)
     predictions.to_csv(scenario_dir / "predictions.csv", index=False)
     return enrich_window_predictions(scenario, predictions, throughput, args.attack_start_sec)
+
+
+def attack_label_mask(features: pd.DataFrame, attack_start_sec: float, detector_profile: str) -> pd.Series:
+    """Return attack-label mask for the selected detector evaluation profile."""
+    if detector_profile == "phase3":
+        return features["window_start_sec"] >= attack_start_sec
+    return features["window_end_sec"] > attack_start_sec
 
 
 def write_aggregate_outputs(
@@ -405,7 +477,11 @@ def synthetic_windows(scenario: str, args: argparse.Namespace, throughput: pd.Da
     starts = np.arange(0.0, max(args.duration_sec - args.window_sec + 1e-9, 0.0) + 1e-9, args.step_sec)
     rows = []
     for index, start in enumerate(starts):
-        is_attack = scenario in {"original_like_ldos", "stat_matched_ldos"} and start + args.window_sec > args.attack_start_sec
+        if args.detector_profile == "phase3":
+            overlaps_attack = start >= args.attack_start_sec
+        else:
+            overlaps_attack = start + args.window_sec > args.attack_start_sec
+        is_attack = scenario in {"original_like_ldos", "stat_matched_ldos"} and overlaps_attack
         if scenario == "original_like_ldos":
             score = 2 if is_attack and index >= args.warmup_windows else 0
         elif scenario == "stat_matched_ldos":

@@ -51,6 +51,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-windows", type=int, default=20)
     parser.add_argument("--score-threshold", type=int, default=2)
     parser.add_argument("--min-packets-for-detection", type=int, default=10)
+    parser.add_argument(
+        "--detector-profile",
+        choices=["current", "phase3"],
+        default="current",
+        help="Use current throughput-impact evaluation or Phase3-compatible UDP baseline/labeling.",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("results_throughput_sweep"))
     parser.add_argument(
         "--synthetic-test",
@@ -128,7 +134,10 @@ def run_mininet_sweep(args: argparse.Namespace, output_dir: Path) -> None:
                     scenario_dir,
                     [no_attack_ts, timeseries],
                     [no_attack_windows, windows],
-                    notes=[f"parameter sweep original_like_ldos burst={burst}, payload={payload}"],
+                    notes=[
+                        f"detector_profile: {args.detector_profile}",
+                        f"parameter sweep original_like_ldos burst={burst}, payload={payload}",
+                    ],
                     attack_start_sec=args.attack_start_sec,
                 )
                 row = scenario_summary_row(
@@ -154,7 +163,10 @@ def run_mininet_sweep(args: argparse.Namespace, output_dir: Path) -> None:
                 scenario_dir,
                 [no_attack_ts, timeseries],
                 [no_attack_windows, windows],
-                notes=[f"stat_matched_ldos using best original_like params burst={burst}, payload={payload}"],
+                notes=[
+                    f"detector_profile: {args.detector_profile}",
+                    f"stat_matched_ldos using best original_like params burst={burst}, payload={payload}",
+                ],
                 attack_start_sec=args.attack_start_sec,
             )
             rows.append(

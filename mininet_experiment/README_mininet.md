@@ -238,6 +238,7 @@ macOSなどMininetを実行できない環境で、出力生成だけ確認す�
 sudo .venv/bin/python mininet_experiment/run_ldos_parameter_sweep.py \
   --duration-sec 60 \
   --attack-start-sec 20 \
+  --detector-profile phase3 \
   --bucket-ms 25 \
   --period-ms 1000 \
   --burst-ms 200 \
@@ -247,6 +248,8 @@ sudo .venv/bin/python mininet_experiment/run_ldos_parameter_sweep.py \
   --output-dir results_throughput_sweep
 ```
 
+`--detector-profile phase3` は、Phase3のMininet A/B実験に合わせて、攻撃前にUDP benign baselineを流してからperiodic LDoSを流します。`original_like_ldos` では `normal_benign` baseline、`stat_matched_ldos` では `random_microburst` baselineを使います。`current` profileはTCPスループット測定のためにTCP-only pre-periodを置く旧設定で、detectorのEMA baseline学習にはPhase3と異なる条件になります。
+
 主な出力:
 
 ```text
@@ -255,6 +258,27 @@ results_throughput_sweep/
   parameter_sweep_summary.md
   degradation_heatmap.png
 ```
+
+検知結果が想定と違う場合は、windowごとの特徴量、EMA、threshold、suspicious scoreを以下で確認できます。
+
+```bash
+.venv/bin/python mininet_experiment/debug_sweep_detection.py \
+  --sweep-dir results_throughput_sweep \
+  --output-dir results_sweep_debug
+```
+
+出力:
+
+```text
+results_sweep_debug/
+  phase3_vs_sweep_diff.md
+  original_like_window_debug.csv
+  stat_matched_window_debug.csv
+  suspicious_score_distribution.csv
+  stat_matched_definition_check.md
+  debug_summary.md
+```
+
 
 ## 注意
 
