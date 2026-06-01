@@ -44,6 +44,7 @@ def parse_iperf_json(json_path: Path, scenario: str) -> pd.DataFrame:
         start = float(interval_sum.get("start", index))
         end = float(interval_sum.get("end", index + 1))
         bps = float(interval_sum.get("bits_per_second", 0.0))
+        retransmits = int(interval_sum.get("retransmits", 0) or 0)
         rows.append(
             {
                 "scenario": scenario,
@@ -52,6 +53,7 @@ def parse_iperf_json(json_path: Path, scenario: str) -> pd.DataFrame:
                 "end_sec": end,
                 "tcp_throughput_bps": bps,
                 "tcp_throughput_mbps": bps / 1_000_000.0,
+                "tcp_retransmits": retransmits,
             }
         )
     return pd.DataFrame(rows)
@@ -209,6 +211,11 @@ def build_throughput_metrics(timeseries: pd.DataFrame, attack_start_sec: float =
         pre_values = frame[frame["end_sec"] <= attack_start_sec]["tcp_throughput_bps"]
         attack_values = frame[frame["end_sec"] > attack_start_sec]["tcp_throughput_bps"]
         full_values = frame["tcp_throughput_bps"]
+        attack_retransmits = (
+            int(frame.loc[frame["end_sec"] > attack_start_sec, "tcp_retransmits"].sum())
+            if "tcp_retransmits" in frame.columns
+            else 0
+        )
         attack_avg_bps = float(attack_values.mean()) if len(attack_values) else 0.0
         pre_avg_bps = float(pre_values.mean()) if len(pre_values) else 0.0
         rows.append(
@@ -219,6 +226,16 @@ def build_throughput_metrics(timeseries: pd.DataFrame, attack_start_sec: float =
                 "pre_attack_tcp_avg_throughput_mbps": pre_avg_bps / 1_000_000.0,
                 "attack_tcp_avg_throughput_bps": attack_avg_bps,
                 "attack_tcp_avg_throughput_mbps": attack_avg_bps / 1_000_000.0,
+                "attack_tcp_min_throughput_bps": float(attack_values.min()) if len(attack_values) else 0.0,
+                "attack_tcp_min_throughput_mbps": float(attack_values.min() / 1_000_000.0) if len(attack_values) else 0.0,
+                "attack_tcp_p05_throughput_bps": float(attack_values.quantile(0.05)) if len(attack_values) else 0.0,
+                "attack_tcp_p05_throughput_mbps": (
+                    float(attack_values.quantile(0.05) / 1_000_000.0) if len(attack_values) else 0.0
+                ),
+                "attack_zero_throughput_window_ratio": (
+                    float((attack_values <= 0.0).sum() / len(attack_values)) if len(attack_values) else 0.0
+                ),
+                "attack_tcp_retransmits": attack_retransmits,
                 "full_tcp_avg_throughput_bps": float(full_values.mean()) if len(full_values) else 0.0,
                 "full_tcp_avg_throughput_mbps": float(full_values.mean() / 1_000_000.0) if len(full_values) else 0.0,
                 "tcp_avg_throughput_bps": attack_avg_bps,

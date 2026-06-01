@@ -279,6 +279,68 @@ results_sweep_debug/
   debug_summary.md
 ```
 
+### Stat-matchedness / TCP degradation tradeoff
+
+R/L/T/payloadをgrid searchして、4特徴量のstat-matched性、TCP throughput degradation、detector FNRのトレードオフを可視化します。detectorロジックは変更せず、周期性指標は分析用にのみ出力します。
+
+```bash
+sudo .venv/bin/python mininet_experiment/run_tradeoff_experiment.py \
+  --duration-sec 60 \
+  --attack-start-sec 20 \
+  --detector-profile phase3 \
+  --grid-search \
+  --attack-rate-mbps-values 30 60 90 120 150 \
+  --burst-ms-values 100 150 200 250 300 400 \
+  --period-ms-values 800 1000 1200 1500 \
+  --payload-size-values 80 750 1000 1200 1472 \
+  --seed 1 \
+  --output-dir results_tradeoff
+```
+
+途中再開:
+
+```bash
+sudo .venv/bin/python mininet_experiment/run_tradeoff_experiment.py \
+  --duration-sec 60 \
+  --attack-start-sec 20 \
+  --detector-profile phase3 \
+  --grid-search \
+  --resume \
+  --output-dir results_tradeoff
+```
+
+RTO presetのみ:
+
+```bash
+sudo .venv/bin/python mininet_experiment/run_tradeoff_experiment.py \
+  --duration-sec 60 \
+  --attack-start-sec 20 \
+  --detector-profile phase3 \
+  --attack-preset all_rto \
+  --seed 1 \
+  --output-dir results_tradeoff_rto
+```
+
+主な出力:
+
+```text
+results_tradeoff/
+  tradeoff_all_conditions.csv
+  pareto_optimal_conditions.csv
+  top_tradeoff_candidates.csv
+  tradeoff_summary.md
+  final_claim_evaluation.md
+  tradeoff_similarity_vs_degradation.png
+  tradeoff_maxdiff_vs_degradation.png
+  tradeoff_3d_similarity_degradation_fnr.png
+  pareto_front_similarity_degradation.png
+  fnr_vs_feature_similarity.png
+  fnr_vs_degradation.png
+  feature_diff_breakdown_top_candidates.png
+  degradation_by_r_l_t_payload_heatmap.png
+  success_level_scatter.png
+```
+
 
 ## 注意
 
