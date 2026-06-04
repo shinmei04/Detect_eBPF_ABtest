@@ -60,6 +60,91 @@ SS_COLUMNS = [
     "raw_ss",
 ]
 
+FOCUSED_PRESETS: dict[str, dict[str, Any]] = {
+    "clean_top": {
+        "attack_mode": [
+            "multi_flow_sync_lddos",
+            "multi_flow_staggered_lddos",
+            "f_lddos",
+        ],
+        "total_attack_rate_mbps_values": [60.0, 120.0],
+        "num_attack_flows_values": [4, 8],
+        "burst_ms_values": [100, 150, 250],
+        "period_ms_values": [1200, 1500],
+        "payload_size_values": [80, 750],
+        "phase_spread_ms_values": [0.0, 100.0],
+        "jitter_ratio_values": [0.25],
+        "payload_mode": ["empirical"],
+        "feint_rate_ratio_values": [0.10],
+        "feint_randomness": ["poisson"],
+        "attack_interval_placement": "end",
+    },
+    "clean_best": {
+        "attack_mode": [
+            "multi_flow_staggered_lddos",
+            "f_lddos",
+        ],
+        "total_attack_rate_mbps_values": [60.0],
+        "num_attack_flows_values": [4, 8],
+        "burst_ms_values": [150, 250],
+        "period_ms_values": [1500],
+        "payload_size_values": [750],
+        "phase_spread_ms_values": [100.0],
+        "jitter_ratio_values": [0.25],
+        "payload_mode": ["empirical"],
+        "feint_rate_ratio_values": [0.10],
+        "feint_randomness": ["poisson"],
+        "attack_interval_placement": "end",
+    },
+}
+FOCUSED_GRID_FLAGS = {
+    "--attack-mode",
+    "--total-attack-rate-mbps-values",
+    "--num-attack-flows-values",
+    "--burst-ms-values",
+    "--period-ms-values",
+    "--payload-size-values",
+    "--phase-spread-ms-values",
+    "--jitter-ratio-values",
+    "--payload-mode",
+    "--feint-rate-ratio-values",
+    "--feint-randomness",
+    "--attack-interval-placement",
+}
+RESULT_FILENAMES = {
+    "experiment_plan": "実験計画.json",
+    "condition_metadata": "条件メタデータ.json",
+    "condition_metrics": "条件別集約結果.csv",
+    "throughput_metrics": "スループット指標.csv",
+    "tcp_throughput_timeseries": "TCPスループット時系列.csv",
+    "tcp_stack_config": "TCPスタック設定.csv",
+    "tcp_ss_timeseries": "TCP内部状態時系列.csv",
+    "tcp_retransmission_metrics": "TCP再送指標.csv",
+    "packet_capture": "パケットキャプチャ.pcap",
+    "iperf_client_json": "iperfクライアント出力.json",
+    "iperf_server_log": "iperfサーバログ.log",
+    "udp_sink_csv": "UDP受信ログ.csv",
+    "udp_sink_log": "UDP受信プロセスログ.log",
+    "packet_capture_log": "パケットキャプチャログ.log",
+    "ss_collection_log": "TCP内部状態収集ログ.log",
+    "iperf_summary": "iperf3集約結果.json",
+    "udp_packets": "pcap抽出UDPパケット.csv",
+    "pcap_rate_summary": "pcap観測レート集約.json",
+    "aggregate_predictions": "集約評価予測.csv",
+    "per_flow_predictions": "フロー別評価予測.csv",
+    "per_flow_metrics": "フロー別評価指標.csv",
+    "sender_phase_flow_log": "送信フェーズ別フローログ.csv",
+    "sender_summary": "送信集約結果.json",
+    "sender_stdout_log": "送信器標準出力.log",
+    "synthetic_notice": "合成スモークテスト注意事項.txt",
+}
+LEGACY_RESULT_FILENAMES = {
+    "condition_metrics": "lddos_condition_metrics.csv",
+    "tcp_stack_config": "tcp_stack_config.csv",
+    "tcp_ss_timeseries": "tcp_ss_timeseries.csv",
+    "tcp_retransmission_metrics": "tcp_retransmission_metrics.csv",
+}
+
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
@@ -69,6 +154,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration-sec", type=float, default=60.0)
     parser.add_argument("--attack-start-sec", type=float, default=20.0)
     parser.add_argument("--detector-profile", choices=["phase3", "current"], default="phase3")
+    parser.add_argument(
+        "--focused-preset",
+        choices=sorted(FOCUSED_PRESETS),
+        help=(
+            "Use a focused clean-tradeoff-derived grid. Cannot be combined with manual attack/grid options."
+        ),
+    )
     parser.add_argument("--attack-mode", nargs="+", choices=["all", *ATTACK_MODES], default=["all"])
     parser.add_argument("--total-attack-rate-mbps-values", type=float, nargs="+", default=[60, 120, 150])
     parser.add_argument("--num-attack-flows-values", type=int, nargs="+", default=[1, 2, 4, 8, 16])
@@ -127,7 +219,27 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Generate deterministic smoke-test artifacts without Mininet.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    apply_focused_preset(args, sys.argv[1:])
+    return args
+
+
+def apply_focused_preset(args: argparse.Namespace, argv: list[str]) -> None:
+    """Apply one focused preset after rejecting ambiguous manual grid options."""
+    if not args.focused_preset:
+        return
+    explicit_grid_flags = sorted(
+        flag
+        for flag in FOCUSED_GRID_FLAGS
+        if any(token == flag or token.startswith(f"{flag}=") for token in argv)
+    )
+    if explicit_grid_flags:
+        joined = ", ".join(explicit_grid_flags)
+        raise SystemExit(
+            f"--focused-preset cannot be combined with manual grid option(s): {joined}"
+        )
+    for attribute, value in FOCUSED_PRESETS[args.focused_preset].items():
+        setattr(args, attribute, value)
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -161,6 +273,17 @@ def main() -> None:
     args = parse_args()
     validate_args(args)
     output_dir = ensure_dir(args.output_dir)
+    planned_condition_count = sum(1 for _ in build_conditions(args))
+    if planned_condition_count <= 0:
+        raise SystemExit("No valid conditions were generated.")
+    experiment_plan = build_experiment_plan(args, planned_condition_count)
+    args.planned_condition_count = planned_condition_count
+    args.estimated_minimum_runtime_sec = experiment_plan["estimated_minimum_runtime_sec"]
+    print_experiment_plan(experiment_plan)
+    result_path(output_dir, "experiment_plan").write_text(
+        json.dumps(experiment_plan, indent=2),
+        encoding="utf-8",
+    )
     conditions = build_conditions(args)
     if not args.synthetic_test:
         assert_mininet_environment()
@@ -170,10 +293,10 @@ def main() -> None:
     new_cases = 0
     if args.synthetic_test:
         for condition in conditions:
-            row_path = output_dir / condition.condition_id / "lddos_condition_metrics.csv"
-            if args.resume and row_path.exists():
+            condition_dir = output_dir / condition.condition_id
+            if args.resume and existing_result_path(condition_dir, "condition_metrics").exists():
                 continue
-            run_condition_synthetic(condition, args, output_dir / condition.condition_id)
+            run_condition_synthetic(condition, args, condition_dir)
             new_cases += 1
             if args.max_cases is not None and new_cases >= args.max_cases:
                 break
@@ -181,7 +304,7 @@ def main() -> None:
         run_mininet_conditions(conditions, args, output_dir)
 
     completed = load_completed_rows(output_dir)
-    write_composite_outputs(completed, output_dir)
+    write_composite_outputs(completed, output_dir, experiment_plan)
     write_tcp_aggregate_outputs(output_dir)
 
 
@@ -202,13 +325,80 @@ def build_conditions(args: argparse.Namespace) -> Iterable[CompositeCondition]:
         attack_interval_placement=args.attack_interval_placement,
         tcp_congestion_controls=args.tcp_congestion_control,
         tcp_sacks=args.tcp_sack,
+        preserve_sync_staggered_shaping=bool(args.focused_preset),
     )
+
+
+def build_experiment_plan(
+    args: argparse.Namespace,
+    planned_condition_count: int,
+) -> dict[str, Any]:
+    """Build condition-count and minimum-runtime metadata."""
+    minimum_runtime_sec = planned_condition_count * len(SCENARIOS) * args.duration_sec
+    invocation_condition_limit = (
+        min(planned_condition_count, args.max_cases)
+        if args.max_cases is not None
+        else planned_condition_count
+    )
+    focused_preset = args.focused_preset or ""
+    return {
+        "focused_preset_used": bool(focused_preset),
+        "focused_preset": focused_preset,
+        "focused_reason": focused_reason(focused_preset),
+        "planned_condition_count": int(planned_condition_count),
+        "scenario_count_per_condition": int(len(SCENARIOS)),
+        "duration_sec_per_scenario": float(args.duration_sec),
+        "estimated_minimum_runtime_sec": float(minimum_runtime_sec),
+        "estimated_minimum_runtime_minutes": float(minimum_runtime_sec / 60.0),
+        "estimated_minimum_runtime_hours": float(minimum_runtime_sec / 3600.0),
+        "max_cases": args.max_cases,
+        "invocation_condition_limit": int(invocation_condition_limit),
+        "invocation_minimum_runtime_sec": float(
+            invocation_condition_limit * len(SCENARIOS) * args.duration_sec
+        ),
+        "resume": bool(args.resume),
+    }
+
+
+def focused_reason(focused_preset: str) -> str:
+    """Return the rationale recorded for focused exploration."""
+    if not focused_preset:
+        return "No focused preset; the manually selected or standard grid is used."
+    if focused_preset == "clean_best":
+        return (
+            "Small focused exploration around the clean-tradeoff best candidate "
+            "r60_l250_t1500_p750."
+        )
+    return (
+        "Focused exploration of the high-success-probability region around "
+        "r60_l250_t1500_p750 and other top clean-tradeoff candidates."
+    )
+
+
+def print_experiment_plan(plan: dict[str, Any]) -> None:
+    """Print the planned condition count and theoretical minimum runtime."""
+    preset = str(plan["focused_preset"]) or "none"
+    print(f"Focused preset: {preset}")
+    print(f"Total planned conditions: {plan['planned_condition_count']}")
+    print(
+        "Estimated minimum runtime: "
+        f"{plan['estimated_minimum_runtime_minutes']:.1f} minutes "
+        f"({plan['estimated_minimum_runtime_hours']:.2f} hours)"
+    )
+    if plan["max_cases"] is not None:
+        invocation_minutes = float(plan["invocation_minimum_runtime_sec"]) / 60.0
+        print(f"This invocation condition limit: {plan['invocation_condition_limit']}")
+        print(f"This invocation minimum runtime: {invocation_minutes:.1f} minutes")
 
 
 def load_completed_rows(output_dir: Path) -> pd.DataFrame:
     """Load all completed per-condition rows."""
     rows = []
-    for path in sorted(output_dir.glob("*/lddos_condition_metrics.csv")):
+    condition_dirs = sorted(path for path in output_dir.iterdir() if path.is_dir())
+    for condition_dir in condition_dirs:
+        path = existing_result_path(condition_dir, "condition_metrics")
+        if not path.exists():
+            continue
         frame = pd.read_csv(path)
         if not frame.empty:
             rows.append(frame)
@@ -237,8 +427,7 @@ def run_mininet_conditions(
         network.start()
         for condition in conditions:
             condition_dir = output_dir / condition.condition_id
-            row_path = condition_dir / "lddos_condition_metrics.csv"
-            if args.resume and row_path.exists():
+            if args.resume and existing_result_path(condition_dir, "condition_metrics").exists():
                 continue
             run_condition_mininet(network, condition, args, condition_dir)
             new_cases += 1
@@ -258,7 +447,7 @@ def run_condition_mininet(
 ) -> None:
     """Run all scenarios for one real Mininet condition."""
     ensure_dir(condition_dir)
-    (condition_dir / "condition_metadata.json").write_text(
+    result_path(condition_dir, "condition_metadata").write_text(
         json.dumps(experiment_metadata(condition, args, synthetic_test=False), indent=2),
         encoding="utf-8",
     )
@@ -289,17 +478,20 @@ def run_condition_mininet(
         tcp_config,
     )
     row["synthetic_test"] = False
-    pd.DataFrame([row]).to_csv(condition_dir / "lddos_condition_metrics.csv", index=False)
-    throughput_metrics.to_csv(condition_dir / "throughput_metrics.csv", index=False)
-    timeseries.to_csv(condition_dir / "tcp_throughput_timeseries.csv", index=False)
-    pd.DataFrame([tcp_config]).to_csv(condition_dir / "tcp_stack_config.csv", index=False)
+    add_plan_fields(row, args)
+    pd.DataFrame([row]).to_csv(result_path(condition_dir, "condition_metrics"), index=False)
+    throughput_metrics.to_csv(result_path(condition_dir, "throughput_metrics"), index=False)
+    timeseries.to_csv(result_path(condition_dir, "tcp_throughput_timeseries"), index=False)
+    pd.DataFrame([tcp_config]).to_csv(result_path(condition_dir, "tcp_stack_config"), index=False)
     condition_ss = (
         pd.concat(ss_frames, ignore_index=True)
         if ss_frames
         else pd.DataFrame(columns=["scenario", *SS_COLUMNS])
     )
-    condition_ss.to_csv(condition_dir / "tcp_ss_timeseries.csv", index=False)
-    pd.DataFrame(retransmission_rows).to_csv(condition_dir / "tcp_retransmission_metrics.csv", index=False)
+    condition_ss.to_csv(result_path(condition_dir, "tcp_ss_timeseries"), index=False)
+    pd.DataFrame(retransmission_rows).to_csv(
+        result_path(condition_dir, "tcp_retransmission_metrics"), index=False
+    )
 
 
 def run_scenario_mininet(
@@ -311,8 +503,8 @@ def run_scenario_mininet(
 ) -> dict[str, Any]:
     """Run one real Mininet scenario."""
     h1, h2, h3 = [network.get(name) for name in ("h1", "h2", "h3")]
-    pcap_path = scenario_dir / f"{scenario}.pcap"
-    iperf_json_path = scenario_dir / "iperf_client.json"
+    pcap_path = result_path(scenario_dir, "packet_capture")
+    iperf_json_path = result_path(scenario_dir, "iperf_client_json")
     has_udp = scenario != "no_attack"
     pids: dict[str, str] = {}
     experiment_start_wall = 0.0
@@ -321,7 +513,7 @@ def run_scenario_mininet(
         pids["iperf_server"] = start_background(
             h2,
             ["iperf3", "-s", "-p", str(IPERF_PORT)],
-            scenario_dir / "iperf_server.log",
+            result_path(scenario_dir, "iperf_server_log"),
         )
         time.sleep(0.4)
         if has_udp:
@@ -337,11 +529,13 @@ def run_scenario_mininet(
                     "--duration-sec",
                     str(args.duration_sec + 3.0),
                     "--log",
-                    str(scenario_dir / "udp_sink.csv"),
+                    str(result_path(scenario_dir, "udp_sink_csv")),
                 ],
-                scenario_dir / "udp_sink.log",
+                result_path(scenario_dir, "udp_sink_log"),
             )
-            pids["tcpdump"] = start_tcpdump(h2, pcap_path, scenario_dir / "tcpdump.log")
+            pids["tcpdump"] = start_tcpdump(
+                h2, pcap_path, result_path(scenario_dir, "packet_capture_log")
+            )
             time.sleep(0.3)
         pids["iperf_client"] = start_background(
             h1,
@@ -375,9 +569,9 @@ def run_scenario_mininet(
                     "--dst-port",
                     str(IPERF_PORT),
                     "--output",
-                    str(scenario_dir / "tcp_ss_timeseries.csv"),
+                    str(result_path(scenario_dir, "tcp_ss_timeseries")),
                 ],
-                scenario_dir / "collect_ss.log",
+                result_path(scenario_dir, "ss_collection_log"),
             )
         if has_udp:
             sender_summary = run_composite_sender(h3, condition, scenario, args, scenario_dir)
@@ -393,9 +587,9 @@ def run_scenario_mininet(
         stop_background(h2, pids.get("iperf_server", ""))
 
     throughput = parse_iperf_json(iperf_json_path, scenario)
-    throughput.to_csv(scenario_dir / "tcp_throughput_timeseries.csv", index=False)
-    write_iperf_summary(iperf_json_path, scenario_dir / "iperf3_json_summary.json")
-    ss_frame = read_optional_csv(scenario_dir / "tcp_ss_timeseries.csv")
+    throughput.to_csv(result_path(scenario_dir, "tcp_throughput_timeseries"), index=False)
+    write_iperf_summary(iperf_json_path, result_path(scenario_dir, "iperf_summary"))
+    ss_frame = read_optional_csv(result_path(scenario_dir, "tcp_ss_timeseries"))
     if not ss_frame.empty:
         ss_frame.insert(0, "scenario", scenario)
     retransmission = retransmission_summary(scenario, throughput, ss_frame)
@@ -411,10 +605,10 @@ def run_scenario_mininet(
             time_origin_sec=experiment_start_wall,
             dst_port=UDP_PORT,
         )
-        packets.to_csv(scenario_dir / "udp_packets_from_pcap.csv", index=False)
+        packets.to_csv(result_path(scenario_dir, "udp_packets"), index=False)
         observed_rates = pcap_rate_summary(packets, condition, scenario, args, sender_summary)
         sender_summary.update(observed_rates)
-        (scenario_dir / "pcap_rate_summary.json").write_text(
+        result_path(scenario_dir, "pcap_rate_summary").write_text(
             json.dumps(observed_rates, indent=2),
             encoding="utf-8",
         )
@@ -432,9 +626,9 @@ def run_scenario_mininet(
             min_packets_for_detection=args.min_packets_for_detection,
             detector_profile=args.detector_profile,
         )
-        aggregate.to_csv(scenario_dir / "aggregate_predictions.csv", index=False)
-        per_flow.to_csv(scenario_dir / "per_flow_predictions.csv", index=False)
-        per_flow_metrics.to_csv(scenario_dir / "per_flow_metrics.csv", index=False)
+        aggregate.to_csv(result_path(scenario_dir, "aggregate_predictions"), index=False)
+        per_flow.to_csv(result_path(scenario_dir, "per_flow_predictions"), index=False)
+        per_flow_metrics.to_csv(result_path(scenario_dir, "per_flow_metrics"), index=False)
         if scenario == "stat_matched_composite_lddos":
             evaluation_metrics = metrics
     return {
@@ -498,14 +692,15 @@ def run_composite_sender(
         "--seed",
         str(args.seed),
         "--log",
-        str(scenario_dir / "sender_phase_flow_log.csv"),
+        str(result_path(scenario_dir, "sender_phase_flow_log")),
         "--summary-json",
-        str(scenario_dir / "sender_summary.json"),
+        str(result_path(scenario_dir, "sender_summary")),
     ]
-    host.cmd(shell_join(command) + f" > {shlex.quote(str(scenario_dir / 'sender_stdout.log'))} 2>&1")
-    summary_path = scenario_dir / "sender_summary.json"
+    stdout_path = result_path(scenario_dir, "sender_stdout_log")
+    host.cmd(shell_join(command) + f" > {shlex.quote(str(stdout_path))} 2>&1")
+    summary_path = result_path(scenario_dir, "sender_summary")
     if not summary_path.exists():
-        raise RuntimeError(f"sender failed; inspect {scenario_dir / 'sender_stdout.log'}")
+        raise RuntimeError(f"sender failed; inspect {stdout_path}")
     return json.loads(summary_path.read_text(encoding="utf-8"))
 
 
@@ -538,7 +733,7 @@ def run_condition_synthetic(
 ) -> None:
     """Generate deterministic smoke-test outputs without Mininet."""
     ensure_dir(condition_dir)
-    (condition_dir / "condition_metadata.json").write_text(
+    result_path(condition_dir, "condition_metadata").write_text(
         json.dumps(experiment_metadata(condition, args, synthetic_test=True), indent=2),
         encoding="utf-8",
     )
@@ -549,8 +744,8 @@ def run_condition_synthetic(
     for scenario in SCENARIOS:
         scenario_dir = ensure_dir(condition_dir / scenario)
         throughput = synthetic_throughput(condition, scenario, args)
-        throughput.to_csv(scenario_dir / "tcp_throughput_timeseries.csv", index=False)
-        (scenario_dir / "iperf3_json_summary.json").write_text(
+        throughput.to_csv(result_path(scenario_dir, "tcp_throughput_timeseries"), index=False)
+        result_path(scenario_dir, "iperf_summary").write_text(
             json.dumps(
                 {
                     "synthetic_test": True,
@@ -566,7 +761,7 @@ def run_condition_synthetic(
         retransmission_rows.append(retransmission_summary(scenario, throughput, pd.DataFrame()))
         if scenario != "no_attack":
             packets = synthetic_packets(condition, scenario, args)
-            packets.to_csv(scenario_dir / "udp_packets_from_pcap.csv", index=False)
+            packets.to_csv(result_path(scenario_dir, "udp_packets"), index=False)
             aggregate, per_flow, metrics, per_flow_metrics = evaluate_packet_views(
                 packets,
                 duration_sec=args.duration_sec,
@@ -581,9 +776,9 @@ def run_condition_synthetic(
                 min_packets_for_detection=args.min_packets_for_detection,
                 detector_profile=args.detector_profile,
             )
-            aggregate.to_csv(scenario_dir / "aggregate_predictions.csv", index=False)
-            per_flow.to_csv(scenario_dir / "per_flow_predictions.csv", index=False)
-            per_flow_metrics.to_csv(scenario_dir / "per_flow_metrics.csv", index=False)
+            aggregate.to_csv(result_path(scenario_dir, "aggregate_predictions"), index=False)
+            per_flow.to_csv(result_path(scenario_dir, "per_flow_predictions"), index=False)
+            per_flow_metrics.to_csv(result_path(scenario_dir, "per_flow_metrics"), index=False)
             sender_summaries[scenario] = synthetic_sender_summary(condition, scenario)
             if scenario == "stat_matched_composite_lddos":
                 evaluation_metrics = metrics
@@ -607,15 +802,18 @@ def run_condition_synthetic(
         tcp_config,
     )
     row["synthetic_test"] = True
-    pd.DataFrame([row]).to_csv(condition_dir / "lddos_condition_metrics.csv", index=False)
-    throughput_metrics.to_csv(condition_dir / "throughput_metrics.csv", index=False)
-    timeseries.to_csv(condition_dir / "tcp_throughput_timeseries.csv", index=False)
-    pd.DataFrame([tcp_config]).to_csv(condition_dir / "tcp_stack_config.csv", index=False)
+    add_plan_fields(row, args)
+    pd.DataFrame([row]).to_csv(result_path(condition_dir, "condition_metrics"), index=False)
+    throughput_metrics.to_csv(result_path(condition_dir, "throughput_metrics"), index=False)
+    timeseries.to_csv(result_path(condition_dir, "tcp_throughput_timeseries"), index=False)
+    pd.DataFrame([tcp_config]).to_csv(result_path(condition_dir, "tcp_stack_config"), index=False)
     pd.DataFrame(columns=["scenario", *SS_COLUMNS]).to_csv(
-        condition_dir / "tcp_ss_timeseries.csv", index=False
+        result_path(condition_dir, "tcp_ss_timeseries"), index=False
     )
-    pd.DataFrame(retransmission_rows).to_csv(condition_dir / "tcp_retransmission_metrics.csv", index=False)
-    (condition_dir / "synthetic_test_notice.txt").write_text(
+    pd.DataFrame(retransmission_rows).to_csv(
+        result_path(condition_dir, "tcp_retransmission_metrics"), index=False
+    )
+    result_path(condition_dir, "synthetic_notice").write_text(
         "Synthetic smoke-test output. Mininet and XDP/eBPF were not executed.\n",
         encoding="utf-8",
     )
@@ -640,18 +838,32 @@ def experiment_metadata(
         "min_packets_for_detection": args.min_packets_for_detection,
         "collect_ss": args.collect_ss,
         "ss_interval_sec": args.ss_interval_sec,
+        "focused_preset": args.focused_preset or "",
+        "planned_condition_count": args.planned_condition_count,
+        "estimated_minimum_runtime_sec": args.estimated_minimum_runtime_sec,
     }
+
+
+def add_plan_fields(row: dict[str, Any], args: argparse.Namespace) -> None:
+    """Add focused-grid execution plan fields to one condition row."""
+    row.update(
+        {
+            "focused_preset": args.focused_preset or "",
+            "planned_condition_count": args.planned_condition_count,
+            "estimated_minimum_runtime_sec": args.estimated_minimum_runtime_sec,
+        }
+    )
 
 
 def write_tcp_aggregate_outputs(output_dir: Path) -> None:
     """Aggregate optional per-condition TCP state files at the result root."""
-    for filename in [
-        "tcp_stack_config.csv",
-        "tcp_ss_timeseries.csv",
-        "tcp_retransmission_metrics.csv",
-    ]:
+    for key in ["tcp_stack_config", "tcp_ss_timeseries", "tcp_retransmission_metrics"]:
         frames = []
-        for path in sorted(output_dir.glob(f"*/{filename}")):
+        condition_dirs = sorted(path for path in output_dir.iterdir() if path.is_dir())
+        for condition_dir in condition_dirs:
+            path = existing_result_path(condition_dir, key)
+            if not path.exists():
+                continue
             frame = read_optional_csv(path)
             if frame.empty:
                 continue
@@ -660,11 +872,26 @@ def write_tcp_aggregate_outputs(output_dir: Path) -> None:
             frames.append(frame)
         if frames:
             aggregate = pd.concat(frames, ignore_index=True)
-        elif filename == "tcp_ss_timeseries.csv":
+        elif key == "tcp_ss_timeseries":
             aggregate = pd.DataFrame(columns=["condition_id", "scenario", *SS_COLUMNS])
         else:
             aggregate = pd.DataFrame()
-        aggregate.to_csv(output_dir / filename, index=False)
+        aggregate.to_csv(result_path(output_dir, key), index=False)
+
+
+def result_path(directory: Path, key: str) -> Path:
+    """Return the Japanese output path for a result artifact."""
+    return directory / RESULT_FILENAMES[key]
+
+
+def existing_result_path(directory: Path, key: str) -> Path:
+    """Return Japanese output path, falling back to a legacy English filename."""
+    japanese = result_path(directory, key)
+    if japanese.exists():
+        return japanese
+    legacy_name = LEGACY_RESULT_FILENAMES.get(key)
+    legacy = directory / legacy_name if legacy_name else japanese
+    return legacy if legacy.exists() else japanese
 
 
 def synthetic_throughput(

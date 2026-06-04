@@ -51,6 +51,30 @@ SCENARIOS = [
     "composite_lddos",
     "stat_matched_composite_lddos",
 ]
+OUTPUT_FILENAMES = {
+    "all_conditions": "全条件集約結果.csv",
+    "top_candidates": "合成攻撃上位候補.csv",
+    "aggregate_success": "集約評価成功条件.csv",
+    "per_flow_success": "フロー別ステルス成功条件.csv",
+    "composite_success": "合成攻撃成功条件.csv",
+    "aggregate_per_flow_comparison": "集約評価とフロー別評価の比較.csv",
+    "f_lddos_comparison": "F-LDDoSと通常LDDoSの比較.csv",
+    "summary": "LDDoS合成実験まとめ.md",
+    "claim_evaluation": "LDDoS最終主張評価.md",
+    "flows_degradation_plot": "フロー数と攻撃効果.png",
+    "flows_similarity_plot": "フロー数とフロー別類似度.png",
+    "feature_diff_plot": "集約評価とフロー別特徴量差.png",
+    "fnr_plot": "集約評価とフロー別見逃し率.png",
+    "tradeoff_plot": "合成攻撃トレードオフ散布図.png",
+    "aggregate_attack_plot": "集約検知と攻撃効果.png",
+    "attack_mode_plot": "攻撃モード比較.png",
+    "f_lddos_degradation_plot": "F-LDDoSと通常LDDoSの攻撃効果比較.png",
+    "f_lddos_excess_plot": "F-LDDoSと通常LDDoSの追加低下率比較.png",
+    "feint_stealth_plot": "フェイント率とステルス効果.png",
+    "feint_degradation_plot": "フェイント率と攻撃効果.png",
+    "f_lddos_similarity_plot": "F-LDDoSの集約評価とフロー別類似度.png",
+    "tcp_sack_plot": "TCP_SACK比較.png",
+}
 
 
 @dataclass(frozen=True)
@@ -91,6 +115,7 @@ def iter_composite_conditions(
     attack_interval_placement: str,
     tcp_congestion_controls: list[str],
     tcp_sacks: list[str],
+    preserve_sync_staggered_shaping: bool = False,
 ) -> Iterable[CompositeCondition]:
     """Yield a mode-aware grid without retaining every condition in memory."""
     requested_modes = ATTACK_MODES if "all" in attack_modes else attack_modes
@@ -108,15 +133,15 @@ def iter_composite_conditions(
         elif mode == "multi_flow_sync_lddos":
             mode_flows = num_flows
             mode_phases = [0.0]
-            mode_jitters = [0.0]
-            mode_payloads = ["fixed"]
+            mode_jitters = jitter_ratios if preserve_sync_staggered_shaping else [0.0]
+            mode_payloads = payload_modes if preserve_sync_staggered_shaping else ["fixed"]
             mode_feints = [first_feint]
             mode_randomness = [first_randomness]
         elif mode == "multi_flow_staggered_lddos":
             mode_flows = num_flows
             mode_phases = phase_spreads
-            mode_jitters = [0.0]
-            mode_payloads = ["fixed"]
+            mode_jitters = jitter_ratios if preserve_sync_staggered_shaping else [0.0]
+            mode_payloads = payload_modes if preserve_sync_staggered_shaping else ["fixed"]
             mode_feints = [first_feint]
             mode_randomness = [first_randomness]
         elif mode in {"multi_flow_randomized_lddos", "score_aware_lddos"}:
@@ -579,36 +604,46 @@ def f_lddos_comparison(frame: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
-def write_composite_outputs(frame: pd.DataFrame, output_dir: Path) -> None:
+def write_composite_outputs(
+    frame: pd.DataFrame,
+    output_dir: Path,
+    experiment_context: dict[str, Any] | None = None,
+) -> None:
     """Write requested aggregate CSV, PNG, and Markdown outputs."""
     ensure_dir(output_dir)
     ordered = frame.sort_values("condition_id").reset_index(drop=True) if not frame.empty else frame
-    ordered.to_csv(output_dir / "lddos_all_conditions.csv", index=False)
+    ordered.to_csv(output_path(output_dir, "all_conditions"), index=False)
     top = (
         ordered.sort_values("composite_attack_score", ascending=False).head(30)
         if not ordered.empty
         else ordered.copy()
     )
-    top.to_csv(output_dir / "top_composite_attack_candidates.csv", index=False)
+    top.to_csv(output_path(output_dir, "top_candidates"), index=False)
     filter_success(ordered, "aggregate_clean_success").to_csv(
-        output_dir / "aggregate_success_conditions.csv", index=False
+        output_path(output_dir, "aggregate_success"), index=False
     )
     filter_success(ordered, "per_flow_stealth_success").to_csv(
-        output_dir / "per_flow_stealth_success_conditions.csv", index=False
+        output_path(output_dir, "per_flow_success"), index=False
     )
     filter_success(ordered, "composite_attack_success").to_csv(
-        output_dir / "composite_attack_success_conditions.csv", index=False
+        output_path(output_dir, "composite_success"), index=False
     )
     comparison = aggregate_vs_perflow_rows(ordered)
-    comparison.to_csv(output_dir / "aggregate_vs_perflow_comparison.csv", index=False)
+    comparison.to_csv(output_path(output_dir, "aggregate_per_flow_comparison"), index=False)
     f_comparison = f_lddos_comparison(ordered)
-    f_comparison.to_csv(output_dir / "f_lddos_vs_baseline_lddos.csv", index=False)
+    f_comparison.to_csv(output_path(output_dir, "f_lddos_comparison"), index=False)
     plot_composite_figures(ordered, output_dir)
-    (output_dir / "lddos_composite_summary.md").write_text(
-        build_composite_summary(ordered, top, comparison, f_comparison),
+    output_path(output_dir, "summary").write_text(
+        build_composite_summary(
+            ordered,
+            top,
+            comparison,
+            f_comparison,
+            experiment_context or {},
+        ),
         encoding="utf-8",
     )
-    (output_dir / "lddos_final_claim_evaluation.md").write_text(
+    output_path(output_dir, "claim_evaluation").write_text(
         build_claim_evaluation(ordered, f_comparison),
         encoding="utf-8",
     )
@@ -625,21 +660,21 @@ def plot_composite_figures(frame: pd.DataFrame, output_dir: Path) -> None:
         frame,
         "num_attack_flows",
         "composite_lddos_degradation",
-        output_dir / "num_flows_vs_degradation.png",
+        output_path(output_dir, "flows_degradation_plot"),
         size_col="total_attack_rate_mbps",
     )
     scatter_by_mode(
         frame,
         "num_attack_flows",
         "per_flow_mean_feature_relative_diff_mean",
-        output_dir / "num_flows_vs_perflow_similarity.png",
+        output_path(output_dir, "flows_similarity_plot"),
     )
     numeric_scatter(
         frame,
         "per_flow_mean_feature_relative_diff_mean",
         "aggregate_mean_feature_relative_diff",
         "composite_lddos_degradation",
-        output_dir / "aggregate_vs_perflow_feature_diff.png",
+        output_path(output_dir, "feature_diff_plot"),
         diagonal=True,
     )
     numeric_scatter(
@@ -647,14 +682,14 @@ def plot_composite_figures(frame: pd.DataFrame, output_dir: Path) -> None:
         "per_flow_FNR_mean",
         "aggregate_FNR",
         "composite_lddos_degradation",
-        output_dir / "aggregate_vs_perflow_fnr.png",
+        output_path(output_dir, "fnr_plot"),
     )
     numeric_scatter(
         frame,
         "per_flow_mean_feature_relative_diff_mean",
         "excess_degradation",
         "aggregate_FNR",
-        output_dir / "composite_tradeoff_scatter.png",
+        output_path(output_dir, "tradeoff_plot"),
         size_col="composite_lddos_degradation",
     )
     numeric_scatter(
@@ -662,38 +697,42 @@ def plot_composite_figures(frame: pd.DataFrame, output_dir: Path) -> None:
         "aggregate_mean_feature_relative_diff",
         "composite_lddos_degradation",
         "aggregate_FNR",
-        output_dir / "aggregate_detection_vs_attack_effect.png",
+        output_path(output_dir, "aggregate_attack_plot"),
     )
-    plot_attack_mode_comparison(frame, output_dir / "attack_mode_comparison.png")
-    box_by_mode(frame, "composite_lddos_degradation", output_dir / "f_lddos_vs_lddos_degradation.png")
-    box_by_mode(frame, "excess_degradation", output_dir / "f_lddos_vs_lddos_excess_degradation.png")
+    plot_attack_mode_comparison(frame, output_path(output_dir, "attack_mode_plot"))
+    box_by_mode(
+        frame,
+        "composite_lddos_degradation",
+        output_path(output_dir, "f_lddos_degradation_plot"),
+    )
+    box_by_mode(frame, "excess_degradation", output_path(output_dir, "f_lddos_excess_plot"))
     f_frame = frame[frame["attack_mode"] == "f_lddos"].copy() if not frame.empty else frame.copy()
     numeric_scatter(
         f_frame,
         "feint_rate_ratio",
         "per_flow_score_lt_2_ratio_mean",
         "composite_lddos_degradation",
-        output_dir / "feint_ratio_vs_stealth_effect.png",
+        output_path(output_dir, "feint_stealth_plot"),
     )
     numeric_scatter(
         f_frame,
         "feint_rate_ratio",
         "composite_lddos_degradation",
         "aggregate_FNR",
-        output_dir / "feint_ratio_vs_degradation.png",
+        output_path(output_dir, "feint_degradation_plot"),
     )
     numeric_scatter(
         f_frame,
         "per_flow_mean_feature_relative_diff_mean",
         "aggregate_mean_feature_relative_diff",
         "composite_lddos_degradation",
-        output_dir / "f_lddos_aggregate_vs_perflow_similarity.png",
+        output_path(output_dir, "f_lddos_similarity_plot"),
     )
     if not frame.empty and frame["tcp_sack"].nunique() > 1:
         box_by_mode(
             frame,
             "composite_lddos_degradation",
-            output_dir / "tcp_sack_comparison.png",
+            output_path(output_dir, "tcp_sack_plot"),
             group_col="tcp_sack",
             color_col="tcp_congestion_control",
         )
@@ -822,13 +861,20 @@ def empty_axis(axis: Any) -> None:
     axis.set_axis_off()
 
 
+def output_path(output_dir: Path, key: str) -> Path:
+    """Return the Japanese output path for an aggregate artifact."""
+    return output_dir / OUTPUT_FILENAMES[key]
+
+
 def build_composite_summary(
     frame: pd.DataFrame,
     top: pd.DataFrame,
     comparison: pd.DataFrame,
     f_comparison: pd.DataFrame,
+    experiment_context: dict[str, Any] | None = None,
 ) -> str:
     """Build lddos_composite_summary.md."""
+    experiment_context = experiment_context or {}
     counts = {
         name: int(frame[name].fillna(False).astype(bool).sum()) if name in frame else 0
         for name in ["aggregate_clean_success", "per_flow_stealth_success", "composite_attack_success"]
@@ -850,6 +896,7 @@ def build_composite_summary(
         f"- completed conditions: {len(frame)}",
         f"- attack modes: {', '.join(sorted(frame['attack_mode'].unique())) if not frame.empty else 'none'}",
         f"- synthetic smoke-test rows: {int(frame.get('synthetic_test', pd.Series(dtype=bool)).fillna(False).astype(bool).sum())}",
+        *focused_experiment_lines(experiment_context),
         "",
         "## 4. attack modeの説明",
         "- single_flow_ldos: 従来型の単一周期バースト。",
@@ -906,11 +953,36 @@ def build_composite_summary(
         "- TCP内部状態ログが不十分な環境では追加確認が必要。",
         "- aggregate型detectorでは合成後のburstが見える可能性がある。",
         "- 周期性指標をdetector判定には使用していない。",
+        "- 実験結果ファイル名は日本語で出力する。CSV列名とscenarioディレクトリ名は分析互換性のため維持する。",
         "",
         "## 18. 次にやるべきこと",
         "上位候補をUbuntu/WSL Mininetで反復実行し、SACK/CC別の再現性を確認した後、XDP/eBPF上で同一packet列を評価する。",
     ]
     return "\n".join(lines) + "\n"
+
+
+def focused_experiment_lines(experiment_context: dict[str, Any]) -> list[str]:
+    """Return focused-preset plan details for the summary."""
+    focused_used = bool(experiment_context.get("focused_preset_used", False))
+    preset = str(experiment_context.get("focused_preset", "")) or "none"
+    planned_count = int(experiment_context.get("planned_condition_count", 0))
+    minimum_minutes = float(experiment_context.get("estimated_minimum_runtime_minutes", 0.0))
+    minimum_hours = float(experiment_context.get("estimated_minimum_runtime_hours", 0.0))
+    lines = [
+        f"- focused_preset used: {'yes' if focused_used else 'no'}",
+        f"- focused_preset name: {preset}",
+        f"- total planned conditions: {planned_count}",
+        f"- estimated minimum runtime: {minimum_minutes:.1f} minutes ({minimum_hours:.2f} hours)",
+    ]
+    if focused_used:
+        lines.extend(
+            [
+                "- exploration strategy: 全探索ではなく、成功可能性の高い範囲を重点探索した。",
+                "- focused rationale: 前回のclean tradeoff評価で有望だった `r60_l250_t1500_p750` 周辺に絞った。",
+                f"- preset rationale detail: {experiment_context.get('focused_reason', '')}",
+            ]
+        )
+    return lines
 
 
 def build_claim_evaluation(frame: pd.DataFrame, f_comparison: pd.DataFrame) -> str:
