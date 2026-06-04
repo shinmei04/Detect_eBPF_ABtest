@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -27,6 +28,7 @@ from src.paper_reproduction_detector import (
     compute_paper_window_features,
     run_paper_detector_by_seed,
 )
+from src.phase_labeling import add_phase_labels
 from src.utils import count_buckets_for_duration, ensure_dir, markdown_table
 
 
@@ -262,6 +264,10 @@ def features_from_packets(
     seed: int,
     stream_id: str,
     detector_profile: str,
+    phase_intervals: Path | pd.DataFrame | None = None,
+    min_overlap_sec: float | None = None,
+    phase_flow_id: str | None = None,
+    phase_src_port: int | None = None,
 ) -> pd.DataFrame:
     """Compute the existing four features from one aggregate or flow packet view."""
     frame = prepare_packet_frame(packets, duration_sec, bucket_ms)
@@ -291,6 +297,17 @@ def features_from_packets(
         attack_mask = features["window_end_sec"] > attack_start_sec
     features["label"] = np.where(is_attack_scenario & attack_mask, "attack", "benign")
     features["target"] = features["label"].eq("attack").astype(int)
+    features = add_phase_labels(
+        features,
+        attack_start_sec=attack_start_sec,
+        phase_intervals=phase_intervals,
+        min_overlap_sec=(
+            float(min_overlap_sec) if min_overlap_sec is not None else bucket_ms / 1000.0
+        ),
+        is_attack_scenario=is_attack_scenario,
+        flow_id=phase_flow_id,
+        src_port=phase_src_port,
+    )
     features.insert(0, "scenario", scenario)
     features.insert(1, "seed", int(seed))
     features["stream_id"] = stream_id
@@ -313,6 +330,10 @@ def evaluate_packet_views(
     score_threshold: int,
     min_packets_for_detection: int,
     detector_profile: str,
+    phase_intervals: Path | pd.DataFrame | None = None,
+    min_overlap_sec: float | None = None,
+    stable_flow_mode: bool = True,
+    src_port_reuse: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], pd.DataFrame]:
     """Run the unchanged detector for aggregate and per-flow packet views."""
     config = PaperDetectorConfig(
@@ -332,6 +353,8 @@ def evaluate_packet_views(
         seed=seed,
         stream_id=f"{scenario}_aggregate_seed_{seed}",
         detector_profile=detector_profile,
+        phase_intervals=phase_intervals,
+        min_overlap_sec=min_overlap_sec,
     )
     aggregate_predictions = run_paper_detector_by_seed(aggregate_features, config)
     aggregate_predictions["evaluation_view"] = "aggregate"
@@ -350,6 +373,14 @@ def evaluate_packet_views(
             seed=seed,
             stream_id=f"{scenario}_{flow_id}_seed_{seed}",
             detector_profile=detector_profile,
+            phase_intervals=phase_intervals,
+            min_overlap_sec=min_overlap_sec,
+            phase_flow_id=str(flow_id),
+            phase_src_port=(
+                int(flow_packets["src_port"].iloc[0])
+                if "src_port" in flow_packets and not flow_packets.empty
+                else None
+            ),
         )
         predictions = run_paper_detector_by_seed(features, config)
         predictions["evaluation_view"] = "per_flow"
@@ -363,6 +394,27 @@ def evaluate_packet_views(
     per_flow_metric_frame = pd.DataFrame(per_flow_metrics)
     aggregate_metrics = view_metrics(aggregate_predictions, prefix="aggregate_")
     aggregate_metrics.update(summarize_per_flow_metrics(per_flow_metric_frame))
+    aggregate_metrics.update(
+        flow_behavior_metrics(
+            packets,
+            aggregate_predictions,
+            stable_flow_mode=stable_flow_mode,
+            src_port_reuse=src_port_reuse,
+        )
+    )
+    for name in [
+        "fnr_period",
+        "fnr_burst",
+        "recall_burst",
+        "fpr_feint",
+        "fpr_quiet",
+        "fpr_pre_attack",
+        "detection_delay_to_first_burst_sec",
+        "suspicious_score_mean_by_phase",
+        "suspicious_score_max_by_phase",
+        "score_lt_2_ratio_burst",
+    ]:
+        aggregate_metrics[name] = aggregate_metrics.get(f"aggregate_{name}", np.nan)
     return aggregate_predictions, per_flow_frame, aggregate_metrics, per_flow_metric_frame
 
 
@@ -391,10 +443,110 @@ def view_metrics(frame: pd.DataFrame, prefix: str, flow_id: str | None = None) -
         counts = evaluated_attack["suspicious_score"].astype(int).value_counts().sort_index()
         distribution = {str(int(index)): int(value) for index, value in counts.items()}
     metrics[f"{prefix}FNR"] = fnr
+    metrics[f"{prefix}fnr_period"] = fnr
     metrics[f"{prefix}score_lt_2_ratio"] = score_lt_2
     metrics[f"{prefix}suspicious_score_distribution"] = json.dumps(distribution, sort_keys=True)
     metrics[f"{prefix}attack_window_count"] = int(len(evaluated_attack))
+    metrics.update(phase_detection_metrics(frame, prefix))
     return metrics
+
+
+def phase_detection_metrics(frame: pd.DataFrame, prefix: str) -> dict[str, Any]:
+    """Compute burst-specific FNR and phase-specific false-positive metrics."""
+    evaluated = (
+        frame[~frame["is_warmup"].fillna(False).astype(bool)].copy()
+        if "is_warmup" in frame
+        else frame.copy()
+    )
+
+    def target_rows(column: str) -> pd.DataFrame:
+        if column not in evaluated:
+            return evaluated.iloc[0:0]
+        return evaluated[evaluated[column].fillna(0).astype(int).eq(1)]
+
+    def all_target_rows(column: str) -> pd.DataFrame:
+        if column not in frame:
+            return frame.iloc[0:0]
+        return frame[frame[column].fillna(0).astype(int).eq(1)]
+
+    def false_negative_rate(rows: pd.DataFrame) -> float:
+        return float((~rows["pred_attack"].astype(bool)).mean()) if not rows.empty else math.nan
+
+    def false_positive_rate(rows: pd.DataFrame) -> float:
+        return float(rows["pred_attack"].astype(bool).mean()) if not rows.empty else math.nan
+
+    period = target_rows("target_period")
+    burst = target_rows("target_burst")
+    fnr_period = false_negative_rate(period)
+    fnr_burst = false_negative_rate(burst)
+    first_burst_start = (
+        float(frame["first_attack_burst_start_sec"].dropna().min())
+        if "first_attack_burst_start_sec" in frame
+        and not frame["first_attack_burst_start_sec"].dropna().empty
+        else math.nan
+    )
+    detected_after_first_burst = (
+        evaluated[
+            evaluated["pred_attack"].astype(bool)
+            & (evaluated["window_end_sec"].astype(float) >= first_burst_start)
+        ]
+        if not math.isnan(first_burst_start)
+        else evaluated.iloc[0:0]
+    )
+    detection_delay = (
+        float(detected_after_first_burst["window_end_sec"].min()) - first_burst_start
+        if not detected_after_first_burst.empty
+        else math.nan
+    )
+    score_means: dict[str, float] = {}
+    score_maxes: dict[str, float] = {}
+    if "truth_phase" in evaluated and "suspicious_score" in evaluated:
+        grouped = evaluated.groupby("truth_phase")["suspicious_score"]
+        score_means = {str(key): float(value) for key, value in grouped.mean().items()}
+        score_maxes = {str(key): float(value) for key, value in grouped.max().items()}
+    return {
+        f"{prefix}fnr_period": fnr_period,
+        f"{prefix}fnr_burst": fnr_burst,
+        f"{prefix}recall_burst": 1.0 - fnr_burst if not math.isnan(fnr_burst) else math.nan,
+        f"{prefix}fpr_feint": false_positive_rate(all_target_rows("target_feint")),
+        f"{prefix}fpr_quiet": false_positive_rate(all_target_rows("target_quiet")),
+        f"{prefix}fpr_pre_attack": false_positive_rate(all_target_rows("target_pre_attack")),
+        f"{prefix}detection_delay_to_first_burst_sec": detection_delay,
+        f"{prefix}score_lt_2_ratio_burst": (
+            float((burst["suspicious_score"].astype(float) < 2.0).mean())
+            if not burst.empty
+            else math.nan
+        ),
+        f"{prefix}suspicious_score_mean_by_phase": json.dumps(score_means, sort_keys=True),
+        f"{prefix}suspicious_score_max_by_phase": json.dumps(score_maxes, sort_keys=True),
+        f"{prefix}burst_window_count": int(len(burst)),
+    }
+
+
+def flow_behavior_metrics(
+    packets: pd.DataFrame,
+    aggregate_predictions: pd.DataFrame,
+    *,
+    stable_flow_mode: bool,
+    src_port_reuse: bool,
+) -> dict[str, Any]:
+    """Summarize flow cardinality and new-flow feature behavior by truth phase."""
+    phase_means: dict[str, float] = {}
+    phase_maxes: dict[str, float] = {}
+    if "truth_phase" in aggregate_predictions and "new_flow_arrival_rate" in aggregate_predictions:
+        grouped = aggregate_predictions.groupby("truth_phase")["new_flow_arrival_rate"]
+        phase_means = {str(key): float(value) for key, value in grouped.mean().items()}
+        phase_maxes = {str(key): float(value) for key, value in grouped.max().items()}
+    rates = aggregate_predictions.get("new_flow_arrival_rate", pd.Series(dtype=float)).astype(float)
+    return {
+        "unique_flow_count_total": int(packets["flow_id"].nunique()) if "flow_id" in packets else 0,
+        "new_flow_arrival_rate_mean": float(rates.mean()) if not rates.empty else 0.0,
+        "new_flow_arrival_rate_max": float(rates.max()) if not rates.empty else 0.0,
+        "new_flow_arrival_rate_mean_by_phase": json.dumps(phase_means, sort_keys=True),
+        "new_flow_arrival_rate_max_by_phase": json.dumps(phase_maxes, sort_keys=True),
+        "stable_flow_mode": bool(stable_flow_mode),
+        "src_port_reuse": bool(src_port_reuse),
+    }
 
 
 def summarize_per_flow_metrics(frame: pd.DataFrame) -> dict[str, Any]:
@@ -409,6 +561,14 @@ def summarize_per_flow_metrics(frame: pd.DataFrame) -> dict[str, Any]:
         "per_flow_score_lt_2_ratio_median": 0.0,
         "per_flow_FNR_mean": 0.0,
         "per_flow_FNR_median": 0.0,
+        "per_flow_fnr_period_mean": 0.0,
+        "per_flow_fnr_burst_mean": math.nan,
+        "per_flow_fnr_burst_median": math.nan,
+        "per_flow_recall_burst_mean": math.nan,
+        "per_flow_fpr_feint_mean": math.nan,
+        "per_flow_fpr_quiet_mean": math.nan,
+        "per_flow_fpr_pre_attack_mean": math.nan,
+        "per_flow_score_lt_2_ratio_burst_mean": math.nan,
     }
     if frame.empty:
         return output
@@ -422,9 +582,29 @@ def summarize_per_flow_metrics(frame: pd.DataFrame) -> dict[str, Any]:
             "per_flow_score_lt_2_ratio_median": float(frame["score_lt_2_ratio"].median()),
             "per_flow_FNR_mean": float(frame["FNR"].mean()),
             "per_flow_FNR_median": float(frame["FNR"].median()),
+            "per_flow_fnr_period_mean": mean_or_nan(frame["fnr_period"]),
+            "per_flow_fnr_burst_mean": mean_or_nan(frame["fnr_burst"]),
+            "per_flow_fnr_burst_median": median_or_nan(frame["fnr_burst"]),
+            "per_flow_recall_burst_mean": mean_or_nan(frame["recall_burst"]),
+            "per_flow_fpr_feint_mean": mean_or_nan(frame["fpr_feint"]),
+            "per_flow_fpr_quiet_mean": mean_or_nan(frame["fpr_quiet"]),
+            "per_flow_fpr_pre_attack_mean": mean_or_nan(frame["fpr_pre_attack"]),
+            "per_flow_score_lt_2_ratio_burst_mean": mean_or_nan(frame["score_lt_2_ratio_burst"]),
         }
     )
     return output
+
+
+def mean_or_nan(values: pd.Series) -> float:
+    """Return a numeric mean without warnings for an all-NA series."""
+    cleaned = pd.to_numeric(values, errors="coerce").dropna()
+    return float(cleaned.mean()) if not cleaned.empty else math.nan
+
+
+def median_or_nan(values: pd.Series) -> float:
+    """Return a numeric median without warnings for an all-NA series."""
+    cleaned = pd.to_numeric(values, errors="coerce").dropna()
+    return float(cleaned.median()) if not cleaned.empty else math.nan
 
 
 def build_scenario_throughput_metrics(
@@ -496,6 +676,8 @@ def build_condition_row(
     row["excess_degradation"] = (
         float(row["composite_lddos_degradation"]) - float(row["random_microburst_degradation"])
     )
+    row["aggregate_FNR_primary"] = effective_aggregate_fnr(row)
+    row["per_flow_FNR_primary"] = effective_per_flow_fnr(row)
     row["aggregate_clean_success"] = aggregate_clean_success(row)
     row["per_flow_stealth_success"] = per_flow_stealth_success(row)
     row["composite_attack_success"] = composite_attack_success(row)
@@ -511,8 +693,24 @@ def aggregate_clean_success(row: dict[str, Any]) -> bool:
         and float(row.get("random_microburst_degradation", 1.0)) <= 0.40
         and float(row.get("aggregate_mean_feature_relative_diff", 1.0)) <= 0.20
         and float(row.get("aggregate_max_feature_relative_diff", 1.0)) <= 0.30
-        and float(row.get("aggregate_FNR", 0.0)) >= 0.70
+        and effective_aggregate_fnr(row) >= 0.70
     )
+
+
+def effective_aggregate_fnr(row: dict[str, Any]) -> float:
+    """Return burst FNR for F-LDDoS and legacy period FNR otherwise."""
+    burst_fnr = row.get("fnr_burst", row.get("aggregate_fnr_burst", math.nan))
+    if str(row.get("attack_mode", "")) == "f_lddos" and not pd.isna(burst_fnr):
+        return float(burst_fnr)
+    return float(row.get("aggregate_FNR", row.get("fnr_period", 0.0)))
+
+
+def effective_per_flow_fnr(row: dict[str, Any]) -> float:
+    """Return per-flow burst FNR for F-LDDoS and legacy period FNR otherwise."""
+    burst_fnr = row.get("per_flow_fnr_burst_mean", math.nan)
+    if str(row.get("attack_mode", "")) == "f_lddos" and not pd.isna(burst_fnr):
+        return float(burst_fnr)
+    return float(row.get("per_flow_FNR_mean", 0.0))
 
 
 def per_flow_stealth_success(row: dict[str, Any]) -> bool:
@@ -552,24 +750,33 @@ def aggregate_vs_perflow_rows(frame: pd.DataFrame) -> pd.DataFrame:
     """Describe aggregate/per-flow detector differences."""
     if frame.empty:
         return frame.copy()
-    result = frame[
-        [
-            "condition_id",
-            "attack_mode",
-            "composite_lddos_degradation",
-            "aggregate_FNR",
-            "per_flow_FNR_mean",
-            "aggregate_mean_feature_relative_diff",
-            "per_flow_mean_feature_relative_diff_mean",
-            "aggregate_score_lt_2_ratio",
-            "per_flow_score_lt_2_ratio_mean",
-        ]
-    ].copy()
+    columns = [
+        "condition_id",
+        "attack_mode",
+        "composite_lddos_degradation",
+        "aggregate_FNR",
+        "per_flow_FNR_mean",
+        "fnr_burst",
+        "per_flow_fnr_burst_mean",
+        "aggregate_mean_feature_relative_diff",
+        "per_flow_mean_feature_relative_diff_mean",
+        "aggregate_score_lt_2_ratio",
+        "per_flow_score_lt_2_ratio_mean",
+    ]
+    source = frame.copy()
+    for column in columns:
+        if column not in source:
+            source[column] = math.nan
+    result = source[columns].copy()
+    result["aggregate_FNR_primary"] = result["fnr_burst"].fillna(result["aggregate_FNR"])
+    result["per_flow_FNR_primary"] = result["per_flow_fnr_burst_mean"].fillna(
+        result["per_flow_FNR_mean"]
+    )
     result["aggregate_detected_per_flow_missed"] = (
-        (result["aggregate_FNR"] < 0.50) & (result["per_flow_FNR_mean"] >= 0.50)
+        (result["aggregate_FNR_primary"] < 0.50) & (result["per_flow_FNR_primary"] >= 0.50)
     )
     result["aggregate_also_missed"] = (
-        (result["aggregate_FNR"] >= 0.50) & (result["per_flow_FNR_mean"] >= 0.50)
+        (result["aggregate_FNR_primary"] >= 0.50) & (result["per_flow_FNR_primary"] >= 0.50)
     )
     result["per_flow_benign_aggregate_abnormal"] = (
         (result["per_flow_mean_feature_relative_diff_mean"] <= 0.20)
@@ -586,6 +793,13 @@ def f_lddos_comparison(frame: pd.DataFrame) -> pd.DataFrame:
         "excess_degradation",
         "aggregate_FNR",
         "per_flow_FNR_mean",
+        "fnr_burst",
+        "per_flow_fnr_burst_mean",
+        "score_lt_2_ratio_burst",
+        "per_flow_score_lt_2_ratio_burst_mean",
+        "fpr_feint",
+        "fpr_quiet",
+        "fpr_pre_attack",
         "aggregate_score_lt_2_ratio",
         "per_flow_score_lt_2_ratio_mean",
         "aggregate_mean_feature_relative_diff",
@@ -593,6 +807,9 @@ def f_lddos_comparison(frame: pd.DataFrame) -> pd.DataFrame:
     ]
     if subset.empty:
         return pd.DataFrame(columns=["attack_mode", "condition_count", *metrics])
+    for metric in metrics:
+        if metric not in subset:
+            subset[metric] = math.nan
     grouped = subset.groupby("attack_mode", as_index=False)[metrics].mean()
     counts = subset.groupby("attack_mode").size().rename("condition_count").reset_index()
     grouped = grouped.merge(counts, on="attack_mode", how="left")
@@ -611,7 +828,8 @@ def write_composite_outputs(
 ) -> None:
     """Write requested aggregate CSV, PNG, and Markdown outputs."""
     ensure_dir(output_dir)
-    ordered = frame.sort_values("condition_id").reset_index(drop=True) if not frame.empty else frame
+    ordered = ensure_primary_fnr_columns(frame)
+    ordered = ordered.sort_values("condition_id").reset_index(drop=True) if not ordered.empty else ordered
     ordered.to_csv(output_path(output_dir, "all_conditions"), index=False)
     top = (
         ordered.sort_values("composite_attack_score", ascending=False).head(30)
@@ -649,6 +867,35 @@ def write_composite_outputs(
     )
 
 
+def ensure_primary_fnr_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Add phase-aware primary FNR columns while preserving legacy result compatibility."""
+    result = frame.copy()
+    if result.empty:
+        return result
+    result["aggregate_FNR_primary"] = result.get("aggregate_FNR", pd.Series(0.0, index=result.index))
+    result["per_flow_FNR_primary"] = result.get(
+        "per_flow_FNR_mean", pd.Series(0.0, index=result.index)
+    )
+    result["per_flow_score_lt_2_ratio_primary"] = result.get(
+        "per_flow_score_lt_2_ratio_mean", pd.Series(0.0, index=result.index)
+    )
+    f_mask = result.get("attack_mode", pd.Series("", index=result.index)).astype(str).eq("f_lddos")
+    if "fnr_burst" in result:
+        available = f_mask & result["fnr_burst"].notna()
+        result.loc[available, "aggregate_FNR_primary"] = result.loc[available, "fnr_burst"]
+    if "per_flow_fnr_burst_mean" in result:
+        available = f_mask & result["per_flow_fnr_burst_mean"].notna()
+        result.loc[available, "per_flow_FNR_primary"] = result.loc[
+            available, "per_flow_fnr_burst_mean"
+        ]
+    if "per_flow_score_lt_2_ratio_burst_mean" in result:
+        available = f_mask & result["per_flow_score_lt_2_ratio_burst_mean"].notna()
+        result.loc[available, "per_flow_score_lt_2_ratio_primary"] = result.loc[
+            available, "per_flow_score_lt_2_ratio_burst_mean"
+        ]
+    return result
+
+
 def filter_success(frame: pd.DataFrame, column: str) -> pd.DataFrame:
     """Return rows where a success column is true."""
     return frame[frame[column].fillna(False).astype(bool)].copy() if column in frame else frame.iloc[0:0].copy()
@@ -679,8 +926,8 @@ def plot_composite_figures(frame: pd.DataFrame, output_dir: Path) -> None:
     )
     numeric_scatter(
         frame,
-        "per_flow_FNR_mean",
-        "aggregate_FNR",
+        "per_flow_FNR_primary",
+        "aggregate_FNR_primary",
         "composite_lddos_degradation",
         output_path(output_dir, "fnr_plot"),
     )
@@ -688,7 +935,7 @@ def plot_composite_figures(frame: pd.DataFrame, output_dir: Path) -> None:
         frame,
         "per_flow_mean_feature_relative_diff_mean",
         "excess_degradation",
-        "aggregate_FNR",
+        "aggregate_FNR_primary",
         output_path(output_dir, "tradeoff_plot"),
         size_col="composite_lddos_degradation",
     )
@@ -696,7 +943,7 @@ def plot_composite_figures(frame: pd.DataFrame, output_dir: Path) -> None:
         frame,
         "aggregate_mean_feature_relative_diff",
         "composite_lddos_degradation",
-        "aggregate_FNR",
+        "aggregate_FNR_primary",
         output_path(output_dir, "aggregate_attack_plot"),
     )
     plot_attack_mode_comparison(frame, output_path(output_dir, "attack_mode_plot"))
@@ -718,7 +965,7 @@ def plot_composite_figures(frame: pd.DataFrame, output_dir: Path) -> None:
         f_frame,
         "feint_rate_ratio",
         "composite_lddos_degradation",
-        "aggregate_FNR",
+        "aggregate_FNR_primary",
         output_path(output_dir, "feint_degradation_plot"),
     )
     numeric_scatter(
@@ -802,8 +1049,8 @@ def plot_attack_mode_comparison(frame: pd.DataFrame, output_path: Path) -> None:
     columns = [
         "composite_lddos_degradation",
         "excess_degradation",
-        "aggregate_FNR",
-        "per_flow_score_lt_2_ratio_mean",
+        "aggregate_FNR_primary",
+        "per_flow_score_lt_2_ratio_primary",
     ]
     fig, axis = plt.subplots(figsize=(12, 6), constrained_layout=True)
     if frame.empty:
@@ -921,7 +1168,12 @@ def build_composite_summary(
         metric_range_text(frame, "per_flow_mean_feature_relative_diff_mean"),
         "",
         "## 9. aggregateでは検知されるか",
-        metric_range_text(frame, "aggregate_FNR"),
+        metric_range_text(frame, "fnr_burst"),
+        "- `fnr_period` はattack_start以降を一括attackとするlegacy評価であり、F-LDDoSの主評価には使わない。",
+        "- `fnr_burst` は本命attack burst windowだけに対する見逃し率であり、F-LDDoSの主評価に使う。",
+        "- `fpr_feint` はfeint-only windowをattackと誤検知した割合である。",
+        "- `fpr_quiet` と `fpr_pre_attack` はquiet-only区間と攻撃開始前区間の誤検知率である。",
+        "- `detection_delay_to_first_burst_sec` は最初のburst開始から最初のattack判定window終了までの遅延である。",
         "",
         "## 10. flow数を増やす効果",
         flow_effect,
@@ -933,7 +1185,10 @@ def build_composite_summary(
         f_text,
         "",
         "## 13. Feinting Intervalがper-flow stealth性を高めたか",
-        metric_range_text(frame[frame["attack_mode"] == "f_lddos"] if not frame.empty else frame, "per_flow_score_lt_2_ratio_mean"),
+        metric_range_text(
+            frame[frame["attack_mode"] == "f_lddos"] if not frame.empty else frame,
+            "per_flow_score_lt_2_ratio_burst_mean",
+        ),
         "",
         "## 14. SACK ON/OFF、CUBIC/Renoの違い",
         sack_text,
@@ -952,6 +1207,8 @@ def build_composite_summary(
         "- detector本体、EMA、threshold、suspicious scoreロジックは変更していない。",
         "- TCP内部状態ログが不十分な環境では追加確認が必要。",
         "- aggregate型detectorでは合成後のburstが見える可能性がある。",
+        "- stable-flow条件ではsource portを固定し、new flow arrival rateを意図的に上げない。flow-table overflow型攻撃とは別条件である。",
+        "- sender phase logがない旧結果ではphase-aware targetを0/NAとして扱い、legacy `target_period`だけを維持する。",
         "- 周期性指標をdetector判定には使用していない。",
         "- 実験結果ファイル名は日本語で出力する。CSV列名とscenarioディレクトリ名は分析互換性のため維持する。",
         "",
@@ -1032,9 +1289,10 @@ def f_claim_verdict(comparison: pd.DataFrame) -> str:
     if baselines.empty:
         return "not supported"
     stealth_improved = (
-        float(f_row["per_flow_score_lt_2_ratio_mean"])
-        > float(baselines["per_flow_score_lt_2_ratio_mean"].max())
-        or float(f_row["per_flow_FNR_mean"]) > float(baselines["per_flow_FNR_mean"].max())
+        float(f_row["per_flow_score_lt_2_ratio_burst_mean"])
+        > float(baselines["per_flow_score_lt_2_ratio_burst_mean"].max())
+        or float(f_row["per_flow_fnr_burst_mean"])
+        > float(baselines["per_flow_fnr_burst_mean"].max())
     )
     degradation_maintained = float(f_row["composite_lddos_degradation"]) >= 0.9 * float(
         baselines["composite_lddos_degradation"].max()
@@ -1053,8 +1311,9 @@ def f_comparison_text(comparison: pd.DataFrame) -> str:
     row = comparison[comparison["attack_mode"] == "f_lddos"].iloc[0]
     return (
         f"F-LDDoS mean degradation={row['composite_lddos_degradation']:.3f}, "
-        f"per-flow score<2 ratio={row['per_flow_score_lt_2_ratio_mean']:.3f}, "
-        f"aggregate FNR={row['aggregate_FNR']:.3f}."
+        f"per-flow burst score<2 ratio={row['per_flow_score_lt_2_ratio_burst_mean']:.3f}, "
+        f"aggregate burst FNR={row['fnr_burst']:.3f}, "
+        f"legacy period FNR={row['aggregate_FNR']:.3f}."
     )
 
 
@@ -1093,7 +1352,8 @@ def row_summary(frame: pd.DataFrame) -> str:
         f"degradation={row['composite_lddos_degradation']:.3f}, "
         f"excess={row['excess_degradation']:.3f}, "
         f"per-flow diff={row['per_flow_mean_feature_relative_diff_mean']:.3f}, "
-        f"aggregate FNR={row['aggregate_FNR']:.3f}."
+        f"aggregate burst FNR={row.get('fnr_burst', math.nan):.3f}, "
+        f"legacy period FNR={row['aggregate_FNR']:.3f}."
     )
 
 

@@ -45,6 +45,7 @@ from src.lddos_composite_analysis import (
     iter_composite_conditions,
     write_composite_outputs,
 )
+from src.phase_labeling import build_phase_intervals, read_phase_intervals
 from src.utils import ensure_dir
 
 
@@ -133,9 +134,11 @@ RESULT_FILENAMES = {
     "aggregate_predictions": "集約評価予測.csv",
     "per_flow_predictions": "フロー別評価予測.csv",
     "per_flow_metrics": "フロー別評価指標.csv",
+    "evaluation_metrics": "評価指標.json",
     "sender_phase_flow_log": "送信フェーズ別フローログ.csv",
     "sender_summary": "送信集約結果.json",
     "sender_stdout_log": "送信器標準出力.log",
+    "flow_behavior_metrics": "フロー挙動指標.json",
     "synthetic_notice": "合成スモークテスト注意事項.txt",
 }
 LEGACY_RESULT_FILENAMES = {
@@ -203,6 +206,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-windows", type=int, default=20)
     parser.add_argument("--score-threshold", type=int, default=2)
     parser.add_argument("--min-packets-for-detection", type=int, default=10)
+    parser.add_argument(
+        "--phase-min-overlap-sec",
+        type=float,
+        help="Minimum attack-burst overlap for target_burst; defaults to bucket_ms / 1000.",
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--collect-ss", action="store_true")
     parser.add_argument("--ss-interval-sec", type=float, default=0.1)
@@ -256,6 +264,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--max-cases must be positive")
     if args.score_threshold <= 0:
         raise SystemExit("--score-threshold must be positive")
+    if args.phase_min_overlap_sec is not None and args.phase_min_overlap_sec <= 0:
+        raise SystemExit("--phase-min-overlap-sec must be positive")
     if any(value <= 0 for value in args.total_attack_rate_mbps_values):
         raise SystemExit("all total attack rates must be positive")
     if any(value <= 0 for value in args.num_attack_flows_values):
@@ -574,7 +584,14 @@ def run_scenario_mininet(
                 result_path(scenario_dir, "ss_collection_log"),
             )
         if has_udp:
-            sender_summary = run_composite_sender(h3, condition, scenario, args, scenario_dir)
+            sender_summary = run_composite_sender(
+                h3,
+                condition,
+                scenario,
+                args,
+                scenario_dir,
+                experiment_start_wall,
+            )
         wait_for_process(h1, pids["iperf_client"])
         if "ss" in pids:
             wait_for_process(h1, pids["ss"])
@@ -595,6 +612,7 @@ def run_scenario_mininet(
     retransmission = retransmission_summary(scenario, throughput, ss_frame)
     evaluation_metrics: dict[str, Any] = {}
     if has_udp:
+        phase_log_path = result_path(scenario_dir, "sender_phase_flow_log")
         _, packets = build_features_from_pcap(
             pcap_path=pcap_path,
             bucket_ms=args.bucket_ms,
@@ -604,6 +622,8 @@ def run_scenario_mininet(
             attack_start_sec=args.attack_start_sec,
             time_origin_sec=experiment_start_wall,
             dst_port=UDP_PORT,
+            phase_intervals=phase_log_path,
+            min_overlap_sec=phase_min_overlap_sec(args),
         )
         packets.to_csv(result_path(scenario_dir, "udp_packets"), index=False)
         observed_rates = pcap_rate_summary(packets, condition, scenario, args, sender_summary)
@@ -625,12 +645,21 @@ def run_scenario_mininet(
             score_threshold=args.score_threshold,
             min_packets_for_detection=args.min_packets_for_detection,
             detector_profile=args.detector_profile,
+            phase_intervals=read_phase_intervals(phase_log_path),
+            min_overlap_sec=phase_min_overlap_sec(args),
+            stable_flow_mode=bool(sender_summary.get("stable_flow_mode", True)),
+            src_port_reuse=bool(sender_summary.get("src_port_reuse", True)),
         )
         aggregate.to_csv(result_path(scenario_dir, "aggregate_predictions"), index=False)
         per_flow.to_csv(result_path(scenario_dir, "per_flow_predictions"), index=False)
         per_flow_metrics.to_csv(result_path(scenario_dir, "per_flow_metrics"), index=False)
+        write_evaluation_metrics(metrics, result_path(scenario_dir, "evaluation_metrics"))
+        write_flow_behavior_metrics(metrics, result_path(scenario_dir, "flow_behavior_metrics"))
         if scenario == "stat_matched_composite_lddos":
             evaluation_metrics = metrics
+    else:
+        result_path(scenario_dir, "evaluation_metrics").write_text("{}\n", encoding="utf-8")
+        write_flow_behavior_metrics({}, result_path(scenario_dir, "flow_behavior_metrics"))
     return {
         "throughput": throughput,
         "ss": ss_frame,
@@ -646,6 +675,7 @@ def run_composite_sender(
     scenario: str,
     args: argparse.Namespace,
     scenario_dir: Path,
+    experiment_start_wall: float,
 ) -> dict[str, Any]:
     """Run the composite sender synchronously inside h3."""
     attack_mode = "single_flow_ldos" if scenario == "single_flow_ldos" else condition.attack_mode
@@ -663,6 +693,8 @@ def run_composite_sender(
         str(args.duration_sec),
         "--attack-start-sec",
         str(args.attack_start_sec),
+        "--experiment-start-wall",
+        str(experiment_start_wall),
         "--scenario",
         scenario,
         "--attack-mode",
@@ -762,6 +794,8 @@ def run_condition_synthetic(
         if scenario != "no_attack":
             packets = synthetic_packets(condition, scenario, args)
             packets.to_csv(result_path(scenario_dir, "udp_packets"), index=False)
+            phase_intervals = phase_intervals_for_condition(condition, scenario, args)
+            phase_intervals.to_csv(result_path(scenario_dir, "sender_phase_flow_log"), index=False)
             aggregate, per_flow, metrics, per_flow_metrics = evaluate_packet_views(
                 packets,
                 duration_sec=args.duration_sec,
@@ -775,15 +809,27 @@ def run_condition_synthetic(
                 score_threshold=args.score_threshold,
                 min_packets_for_detection=args.min_packets_for_detection,
                 detector_profile=args.detector_profile,
+                phase_intervals=phase_intervals,
+                min_overlap_sec=phase_min_overlap_sec(args),
+                stable_flow_mode=True,
+                src_port_reuse=True,
             )
             aggregate.to_csv(result_path(scenario_dir, "aggregate_predictions"), index=False)
             per_flow.to_csv(result_path(scenario_dir, "per_flow_predictions"), index=False)
             per_flow_metrics.to_csv(result_path(scenario_dir, "per_flow_metrics"), index=False)
+            write_evaluation_metrics(metrics, result_path(scenario_dir, "evaluation_metrics"))
+            write_flow_behavior_metrics(metrics, result_path(scenario_dir, "flow_behavior_metrics"))
             sender_summaries[scenario] = synthetic_sender_summary(condition, scenario)
+            result_path(scenario_dir, "sender_summary").write_text(
+                json.dumps(sender_summaries[scenario], indent=2),
+                encoding="utf-8",
+            )
             if scenario == "stat_matched_composite_lddos":
                 evaluation_metrics = metrics
         else:
             sender_summaries[scenario] = {}
+            result_path(scenario_dir, "evaluation_metrics").write_text("{}\n", encoding="utf-8")
+            write_flow_behavior_metrics({}, result_path(scenario_dir, "flow_behavior_metrics"))
 
     timeseries = pd.concat(timeseries_frames, ignore_index=True)
     throughput_metrics = build_scenario_throughput_metrics(timeseries, args.attack_start_sec)
@@ -836,12 +882,82 @@ def experiment_metadata(
         "warmup_windows": args.warmup_windows,
         "score_threshold": args.score_threshold,
         "min_packets_for_detection": args.min_packets_for_detection,
+        "phase_min_overlap_sec": phase_min_overlap_sec(args),
         "collect_ss": args.collect_ss,
         "ss_interval_sec": args.ss_interval_sec,
         "focused_preset": args.focused_preset or "",
         "planned_condition_count": args.planned_condition_count,
         "estimated_minimum_runtime_sec": args.estimated_minimum_runtime_sec,
     }
+
+
+def phase_min_overlap_sec(args: argparse.Namespace) -> float:
+    """Return the configured burst-overlap threshold."""
+    return (
+        float(args.phase_min_overlap_sec)
+        if args.phase_min_overlap_sec is not None
+        else args.bucket_ms / 1000.0
+    )
+
+
+def phase_intervals_for_condition(
+    condition: CompositeCondition,
+    scenario: str,
+    args: argparse.Namespace,
+) -> pd.DataFrame:
+    """Build sender-equivalent phase intervals for synthetic smoke tests."""
+    mode = "single_flow_ldos" if scenario == "single_flow_ldos" else condition.attack_mode
+    num_flows = 1 if scenario == "single_flow_ldos" else condition.num_attack_flows
+    return build_phase_intervals(
+        duration_sec=args.duration_sec,
+        attack_start_sec=args.attack_start_sec,
+        scenario=scenario,
+        attack_mode=mode,
+        num_flows=num_flows,
+        period_ms=condition.period_ms,
+        burst_ms=condition.burst_ms,
+        phase_spread_ms=condition.phase_spread_ms,
+        attack_interval_placement=condition.attack_interval_placement,
+        seed=args.seed,
+        per_flow_rate_mbps=condition.total_attack_rate_mbps / num_flows,
+        feint_rate_ratio=condition.feint_rate_ratio,
+    )
+
+
+def write_flow_behavior_metrics(metrics: dict[str, Any], output: Path) -> None:
+    """Write stable-flow and new-flow-arrival checks for one scenario."""
+    names = [
+        "unique_flow_count_total",
+        "new_flow_arrival_rate_mean",
+        "new_flow_arrival_rate_max",
+        "new_flow_arrival_rate_mean_by_phase",
+        "new_flow_arrival_rate_max_by_phase",
+        "stable_flow_mode",
+        "src_port_reuse",
+    ]
+    defaults = {
+        "unique_flow_count_total": 0,
+        "new_flow_arrival_rate_mean": 0.0,
+        "new_flow_arrival_rate_max": 0.0,
+        "new_flow_arrival_rate_mean_by_phase": {},
+        "new_flow_arrival_rate_max_by_phase": {},
+        "stable_flow_mode": False,
+        "src_port_reuse": False,
+    }
+    payload = {name: metrics.get(name, defaults[name]) for name in names}
+    for name in ["new_flow_arrival_rate_mean_by_phase", "new_flow_arrival_rate_max_by_phase"]:
+        if isinstance(payload[name], str):
+            payload[name] = json.loads(payload[name])
+    output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def write_evaluation_metrics(metrics: dict[str, Any], output: Path) -> None:
+    """Write scenario metrics using JSON null for unavailable phase metrics."""
+    payload = {
+        key: None if isinstance(value, float) and math.isnan(value) else value
+        for key, value in metrics.items()
+    }
+    output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def add_plan_fields(row: dict[str, Any], args: argparse.Namespace) -> None:
@@ -956,8 +1072,10 @@ def synthetic_packets(
     burst_buckets = max(1, int(round(condition.burst_ms / args.bucket_ms)))
     attack_start_bucket = int(round(args.attack_start_sec / bucket_sec))
     packets_per_bucket = max(10, min(32, int(round(condition.per_flow_rate_mbps / 2.0)) + 10))
+    phase_plan = phase_intervals_for_condition(condition, scenario, args)
     rows = []
     for flow in range(num_flows):
+        flow_plan = phase_plan[phase_plan["src_port"].astype(int).eq(40000 + flow)]
         phases: dict[int, int] = {}
         for period_index in range(int(math.ceil(total_buckets / period_buckets)) + 1):
             max_phase = max(0, period_buckets - burst_buckets)
@@ -969,14 +1087,14 @@ def synthetic_packets(
                 active = phases[period_index] <= phase < phases[period_index] + burst_buckets
                 count = packets_per_bucket if active else 0
             else:
-                offset = synthetic_phase_offset(condition, flow, num_flows, period_index, rng, period_buckets, burst_buckets)
-                if condition.attack_mode == "f_lddos" and condition.attack_interval_placement == "end":
-                    start_phase = max(0, period_buckets - burst_buckets - offset)
-                else:
-                    start_phase = offset
-                active = start_phase <= phase < min(period_buckets, start_phase + burst_buckets)
-                count = packets_per_bucket if active else 0
-                if condition.attack_mode == "f_lddos" and phase < start_phase:
+                bucket_start = bucket * bucket_sec
+                bucket_end = bucket_start + bucket_sec
+                burst_active = phase_overlaps_bucket(
+                    flow_plan, "attack_burst", bucket_start, bucket_end
+                )
+                feint_active = phase_overlaps_bucket(flow_plan, "feint", bucket_start, bucket_end)
+                count = packets_per_bucket if burst_active else 0
+                if feint_active:
                     feint_count = int(round(packets_per_bucket * condition.feint_rate_ratio))
                     count += feint_count if rng.random() < 0.35 else 0
             for packet_index in range(count):
@@ -997,26 +1115,22 @@ def synthetic_packets(
     return pd.DataFrame(rows).sort_values("timestamp_sec", kind="mergesort").reset_index(drop=True)
 
 
-def synthetic_phase_offset(
-    condition: CompositeCondition,
-    flow: int,
-    num_flows: int,
-    period_index: int,
-    rng: random.Random,
-    period_buckets: int,
-    burst_buckets: int,
-) -> int:
-    """Return a synthetic phase offset in buckets."""
-    max_offset = min(
-        max(0, period_buckets - burst_buckets),
-        int(round(condition.phase_spread_ms / 25.0)),
+def phase_overlaps_bucket(
+    phase_plan: pd.DataFrame,
+    phase: str,
+    bucket_start: float,
+    bucket_end: float,
+) -> bool:
+    """Return whether one planned phase overlaps a synthetic packet bucket."""
+    rows = phase_plan[phase_plan["phase"].eq(phase)]
+    if rows.empty:
+        return False
+    return bool(
+        (
+            (rows["phase_start_sec"].astype(float) < bucket_end)
+            & (rows["phase_end_sec"].astype(float) > bucket_start)
+        ).any()
     )
-    if condition.attack_mode in {"single_flow_ldos", "multi_flow_sync_lddos"} or max_offset <= 0:
-        return 0
-    if condition.attack_mode == "multi_flow_staggered_lddos":
-        return int(round(flow * max_offset / max(1, num_flows - 1)))
-    local = random.Random(rng.random() + flow * 1009 + period_index * 17)
-    return local.randint(0, max_offset)
 
 
 def synthetic_payload(condition: CompositeCondition, rng: random.Random) -> int:
@@ -1047,6 +1161,9 @@ def synthetic_sender_summary(condition: CompositeCondition, scenario: str) -> di
         "udp_actual_per_flow_average_rate_mbps": (condition.total_attack_rate_mbps * duty + feint_rate) / num_flows,
         "feint_actual_rate_mbps": feint_rate,
         "attack_actual_rate_mbps": condition.total_attack_rate_mbps * 0.97,
+        "unique_flow_count_total": num_flows,
+        "stable_flow_mode": True,
+        "src_port_reuse": True,
     }
 
 

@@ -13,10 +13,18 @@ import json
 import math
 import random
 import socket
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.phase_labeling import build_phase_intervals, canonical_phase, phase_offsets_ms
 
 
 ATTACK_MODES = [
@@ -56,6 +64,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-src-port", type=int, default=40000)
     parser.add_argument("--duration-sec", type=float, required=True)
     parser.add_argument("--attack-start-sec", type=float, required=True)
+    parser.add_argument(
+        "--experiment-start-wall",
+        type=float,
+        help="Wall-clock origin used by pcap timestamps; defaults to sender start.",
+    )
     parser.add_argument("--scenario", choices=SCENARIOS, required=True)
     parser.add_argument("--attack-mode", choices=ATTACK_MODES, required=True)
     parser.add_argument("--total-attack-rate-mbps", type=float, required=True)
@@ -176,22 +189,6 @@ def rate_events(
             interval = mean_interval * factor
         current += max(interval, 1e-7)
     return events
-
-
-def phase_offsets_ms(
-    mode: str,
-    num_flows: int,
-    spread_ms: float,
-    period_index: int,
-    seed: int,
-) -> list[float]:
-    """Return deterministic or seeded per-flow phase offsets."""
-    if num_flows <= 1 or mode in {"single_flow_ldos", "multi_flow_sync_lddos"}:
-        return [0.0] * num_flows
-    if mode == "multi_flow_staggered_lddos":
-        return [flow * spread_ms / max(1, num_flows - 1) for flow in range(num_flows)]
-    rng = random.Random(seed * 1_000_003 + period_index * 10_007)
-    return [rng.uniform(0.0, spread_ms) for _ in range(num_flows)]
 
 
 def event_stream(args: argparse.Namespace) -> tuple[Iterable[PacketEvent], dict[str, object]]:
@@ -365,6 +362,21 @@ def send_events(
 ) -> dict[str, object]:
     """Send scheduled events and write measured phase/flow summaries."""
     num_flows = int(metadata["num_attack_flows"])
+    phase_plan = build_phase_intervals(
+        duration_sec=args.duration_sec,
+        attack_start_sec=args.attack_start_sec,
+        scenario=args.scenario,
+        attack_mode=str(metadata["attack_mode"]),
+        num_flows=num_flows,
+        period_ms=args.period_ms,
+        burst_ms=args.burst_ms,
+        phase_spread_ms=float(metadata["phase_spread_ms"]),
+        attack_interval_placement=args.attack_interval_placement,
+        seed=args.seed,
+        per_flow_rate_mbps=float(metadata["per_flow_rate_mbps"]),
+        feint_rate_ratio=args.feint_rate_ratio,
+        base_src_port=args.base_src_port,
+    )
     sockets = []
     for flow in range(num_flows):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -373,26 +385,32 @@ def send_events(
 
     start_monotonic = time.monotonic()
     start_wall = time.time()
+    rows = phase_plan.to_dict(orient="records")
     records: dict[tuple[str, int, int], dict[str, object]] = {}
+    for row in rows:
+        row.update(
+            {
+                "packet_count": 0,
+                "byte_count": 0,
+                "first_send_sec": math.nan,
+                "last_send_sec": math.nan,
+            }
+        )
+        if row["phase"] != "quiet":
+            flow_index = int(str(row["flow_id"]).replace("flow_", ""))
+            records[(str(row["phase"]), int(row["period_index"]), flow_index)] = row
     try:
         for event in events:
+            phase = canonical_phase(event.phase)
+            key = (phase, event.period_index, event.flow_index)
+            record = records.get(key)
+            if record is None:
+                raise RuntimeError(f"phase plan missing sender event key: {key}")
+            record["planned_packets"] = int(record["planned_packets"]) + 1
             sleep_until(start_monotonic + event.scheduled_sec)
             sockets[event.flow_index].sendto(b"L" * event.payload_size, (args.dst_ip, args.dst_port))
             now = time.monotonic() - start_monotonic
-            key = (event.phase, event.period_index, event.flow_index)
-            record = records.setdefault(
-                key,
-                {
-                    "phase": event.phase,
-                    "period_index": event.period_index,
-                    "flow_id": f"flow_{event.flow_index}",
-                    "src_port": args.base_src_port + event.flow_index,
-                    "packet_count": 0,
-                    "byte_count": 0,
-                    "first_send_sec": math.nan,
-                    "last_send_sec": math.nan,
-                },
-            )
+            record["sent_packets"] = int(record["sent_packets"]) + 1
             record["packet_count"] = int(record["packet_count"]) + 1
             record["byte_count"] = int(record["byte_count"]) + event.payload_size
             if math.isnan(float(record["first_send_sec"])):
@@ -403,16 +421,25 @@ def send_events(
         for sock in sockets:
             sock.close()
 
-    rows = list(records.values())
+    experiment_start_wall = float(getattr(args, "experiment_start_wall", None) or start_wall)
+    phase_time_offset_sec = start_wall - experiment_start_wall
     for row in rows:
         first = float(row["first_send_sec"])
         last = float(row["last_send_sec"])
-        active = max(0.0, last - first)
+        active = max(0.0, last - first) if not math.isnan(first) and not math.isnan(last) else 0.0
         row["active_duration_sec"] = active
         row["actual_active_rate_mbps"] = (
             int(row["byte_count"]) * 8.0 / active / 1_000_000.0 if active > 0 else 0.0
         )
-        row["experiment_start_wall"] = start_wall
+        row["phase_start_sec"] = float(row["phase_start_sec"]) + phase_time_offset_sec
+        row["phase_end_sec"] = float(row["phase_end_sec"]) + phase_time_offset_sec
+        if not math.isnan(first):
+            row["first_send_sec"] = first + phase_time_offset_sec
+        if not math.isnan(last):
+            row["last_send_sec"] = last + phase_time_offset_sec
+        row["phase_time_offset_sec"] = phase_time_offset_sec
+        row["sender_start_wall"] = start_wall
+        row["experiment_start_wall"] = experiment_start_wall
 
     args.log.parent.mkdir(parents=True, exist_ok=True)
     with args.log.open("w", newline="", encoding="utf-8") as handle:
@@ -420,13 +447,20 @@ def send_events(
             "phase",
             "period_index",
             "flow_id",
+            "phase_start_sec",
+            "phase_end_sec",
+            "planned_packets",
+            "sent_packets",
             "src_port",
+            "rate_mbps",
             "packet_count",
             "byte_count",
             "first_send_sec",
             "last_send_sec",
             "active_duration_sec",
             "actual_active_rate_mbps",
+            "phase_time_offset_sec",
+            "sender_start_wall",
             "experiment_start_wall",
         ]
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -446,7 +480,7 @@ def summarize_records(
 ) -> dict[str, object]:
     """Build aggregate and per-flow actual-rate metrics."""
     num_flows = int(metadata["num_attack_flows"])
-    attack_rows = [row for row in rows if row["phase"] == "attack"]
+    attack_rows = [row for row in rows if row["phase"] == "attack_burst"]
     feint_rows = [row for row in rows if row["phase"] == "feint"]
     attack_bytes = sum(int(row["byte_count"]) for row in attack_rows)
     feint_bytes = sum(int(row["byte_count"]) for row in feint_rows)
@@ -480,6 +514,10 @@ def summarize_records(
         "feint_sent_bytes": int(feint_bytes),
         "duration_sec": float(args.duration_sec),
         "attack_duration_sec": float(attack_duration),
+        "unique_flow_count_total": int(num_flows),
+        "stable_flow_mode": True,
+        "src_port_reuse": True,
+        "phase_time_offset_sec": float(rows[0].get("phase_time_offset_sec", 0.0)) if rows else 0.0,
     }
 
 

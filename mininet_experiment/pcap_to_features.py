@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.paper_reproduction_detector import compute_paper_window_features
+from src.phase_labeling import add_phase_labels
 from src.utils import count_buckets_for_duration
 
 
@@ -44,6 +45,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step-sec", type=float, default=1.0)
     parser.add_argument("--duration-sec", type=float)
     parser.add_argument("--attack-start-sec", type=float)
+    parser.add_argument("--phase-log", type=Path)
+    parser.add_argument(
+        "--min-overlap-sec",
+        type=float,
+        help="Minimum attack-burst overlap for target_burst; defaults to bucket_ms / 1000.",
+    )
     parser.add_argument("--time-origin-sec", type=float)
     parser.add_argument("--dst-port", type=int, default=5001)
     return parser.parse_args()
@@ -52,6 +59,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """CLI entry point."""
     args = parse_args()
+    if args.min_overlap_sec is not None and args.min_overlap_sec <= 0:
+        raise SystemExit("--min-overlap-sec must be positive")
     features, packets = build_features_from_pcap(
         pcap_path=args.pcap,
         bucket_ms=args.bucket_ms,
@@ -61,6 +70,8 @@ def main() -> None:
         attack_start_sec=args.attack_start_sec,
         time_origin_sec=args.time_origin_sec,
         dst_port=args.dst_port,
+        phase_intervals=args.phase_log,
+        min_overlap_sec=args.min_overlap_sec,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     features.to_csv(args.output, index=False)
@@ -78,6 +89,8 @@ def build_features_from_pcap(
     attack_start_sec: float | None,
     time_origin_sec: float | None = None,
     dst_port: int = 5001,
+    phase_intervals: Path | pd.DataFrame | None = None,
+    min_overlap_sec: float | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Parse pcap and return ``(features, packets)`` DataFrames."""
     packets = parse_udp_pcap(pcap_path, dst_port=dst_port)
@@ -126,6 +139,15 @@ def build_features_from_pcap(
     else:
         features["label"] = np.where(features["window_start_sec"] >= attack_start_sec, "attack", "benign")
     features["target"] = (features["label"] == "attack").astype(int)
+    features = add_phase_labels(
+        features,
+        attack_start_sec=float(attack_start_sec) if attack_start_sec is not None else math.inf,
+        phase_intervals=phase_intervals,
+        min_overlap_sec=(
+            float(min_overlap_sec) if min_overlap_sec is not None else bucket_ms / 1000.0
+        ),
+        is_attack_scenario=attack_start_sec is not None,
+    )
     return features, packets
 
 
