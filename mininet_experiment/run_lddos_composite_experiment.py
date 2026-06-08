@@ -113,39 +113,74 @@ FOCUSED_GRID_FLAGS = {
     "--attack-interval-placement",
 }
 RESULT_FILENAMES = {
-    "experiment_plan": "実験計画.json",
-    "condition_metadata": "条件メタデータ.json",
-    "condition_metrics": "条件別集約結果.csv",
-    "throughput_metrics": "スループット指標.csv",
-    "tcp_throughput_timeseries": "TCPスループット時系列.csv",
-    "tcp_stack_config": "TCPスタック設定.csv",
-    "tcp_ss_timeseries": "TCP内部状態時系列.csv",
-    "tcp_retransmission_metrics": "TCP再送指標.csv",
-    "packet_capture": "パケットキャプチャ.pcap",
-    "iperf_client_json": "iperfクライアント出力.json",
-    "iperf_server_log": "iperfサーバログ.log",
-    "udp_sink_csv": "UDP受信ログ.csv",
-    "udp_sink_log": "UDP受信プロセスログ.log",
-    "packet_capture_log": "パケットキャプチャログ.log",
-    "ss_collection_log": "TCP内部状態収集ログ.log",
-    "iperf_summary": "iperf3集約結果.json",
-    "udp_packets": "pcap抽出UDPパケット.csv",
-    "pcap_rate_summary": "pcap観測レート集約.json",
-    "aggregate_predictions": "集約評価予測.csv",
-    "per_flow_predictions": "フロー別評価予測.csv",
-    "per_flow_metrics": "フロー別評価指標.csv",
-    "evaluation_metrics": "評価指標.json",
-    "sender_phase_flow_log": "送信フェーズ別フローログ.csv",
-    "sender_summary": "送信集約結果.json",
-    "sender_stdout_log": "送信器標準出力.log",
-    "flow_behavior_metrics": "フロー挙動指標.json",
-    "synthetic_notice": "合成スモークテスト注意事項.txt",
+    "experiment_plan": "00_実験計画.json",
+    "condition_metadata": "00_条件メタデータ.json",
+    "condition_metrics": "01_条件別集約結果.csv",
+    "throughput_metrics": "02_スループット指標.csv",
+    "tcp_throughput_timeseries": "03_TCPスループット時系列.csv",
+    "tcp_stack_config": "04_TCPスタック設定.csv",
+    "tcp_ss_timeseries": "05_TCP内部状態時系列.csv",
+    "tcp_retransmission_metrics": "06_TCP再送指標.csv",
+    "packet_capture": "07_パケットキャプチャ.pcap",
+    "iperf_client_json": "08_iPerf3クライアント出力.json",
+    "iperf_server_log": "09_iPerf3サーバログ.log",
+    "udp_sink_csv": "10_UDP受信ログ.csv",
+    "udp_sink_log": "11_UDP受信プロセスログ.log",
+    "packet_capture_log": "12_パケットキャプチャログ.log",
+    "ss_collection_log": "13_TCP内部状態収集ログ.log",
+    "iperf_summary": "14_iPerf3集約結果.json",
+    "udp_packets": "15_PCAP抽出UDPパケット.csv",
+    "pcap_rate_summary": "16_PCAP観測レート集約.json",
+    "aggregate_predictions": "17_集約評価予測.csv",
+    "per_flow_predictions": "18_フロー別評価予測.csv",
+    "per_flow_metrics": "19_フロー別評価指標.csv",
+    "evaluation_metrics": "20_評価指標.json",
+    "sender_phase_flow_log": "21_送信フェーズ別フローログ.csv",
+    "sender_summary": "22_送信集約結果.json",
+    "sender_stdout_log": "23_送信器標準出力.log",
+    "flow_behavior_metrics": "24_フロー挙動指標.json",
+    "synthetic_notice": "25_合成スモークテスト注意事項.txt",
 }
-LEGACY_RESULT_FILENAMES = {
-    "condition_metrics": "lddos_condition_metrics.csv",
-    "tcp_stack_config": "tcp_stack_config.csv",
-    "tcp_ss_timeseries": "tcp_ss_timeseries.csv",
-    "tcp_retransmission_metrics": "tcp_retransmission_metrics.csv",
+ROOT_RESULT_FILENAMES = {
+    "tcp_stack_config": "23_TCPスタック設定.csv",
+    "tcp_ss_timeseries": "24_TCP内部状態時系列.csv",
+    "tcp_retransmission_metrics": "25_TCP再送指標.csv",
+}
+LEGACY_RESULT_FILENAMES: dict[str, list[str]] = {
+    "experiment_plan": ["実験計画.json"],
+    "condition_metadata": ["条件メタデータ.json"],
+    "condition_metrics": ["条件別集約結果.csv", "lddos_condition_metrics.csv"],
+    "throughput_metrics": ["スループット指標.csv"],
+    "tcp_throughput_timeseries": ["TCPスループット時系列.csv"],
+    "tcp_stack_config": ["TCPスタック設定.csv", "tcp_stack_config.csv"],
+    "tcp_ss_timeseries": ["TCP内部状態時系列.csv", "tcp_ss_timeseries.csv"],
+    "tcp_retransmission_metrics": ["TCP再送指標.csv", "tcp_retransmission_metrics.csv"],
+    "packet_capture": ["パケットキャプチャ.pcap"],
+    "iperf_client_json": ["iperfクライアント出力.json"],
+    "iperf_server_log": ["iperfサーバログ.log"],
+    "udp_sink_csv": ["UDP受信ログ.csv"],
+    "udp_sink_log": ["UDP受信プロセスログ.log"],
+    "packet_capture_log": ["パケットキャプチャログ.log"],
+    "ss_collection_log": ["TCP内部状態収集ログ.log"],
+    "iperf_summary": ["iperf3集約結果.json"],
+    "udp_packets": ["pcap抽出UDPパケット.csv"],
+    "pcap_rate_summary": ["pcap観測レート集約.json"],
+    "aggregate_predictions": ["集約評価予測.csv"],
+    "per_flow_predictions": ["フロー別評価予測.csv"],
+    "per_flow_metrics": ["フロー別評価指標.csv"],
+    "evaluation_metrics": ["評価指標.json"],
+    "sender_phase_flow_log": ["送信フェーズ別フローログ.csv"],
+    "sender_summary": ["送信集約結果.json"],
+    "sender_stdout_log": ["送信器標準出力.log"],
+    "flow_behavior_metrics": ["フロー挙動指標.json"],
+    "synthetic_notice": ["合成スモークテスト注意事項.txt"],
+}
+SCENARIO_DIR_NAMES = {
+    "no_attack": "01_攻撃なし",
+    "random_microburst_only": "02_正常マイクロバーストのみ",
+    "single_flow_ldos": "03_単一LDoS",
+    "composite_lddos": "04_合成LDDoS",
+    "stat_matched_composite_lddos": "05_統計類似合成LDDoS",
 }
 
 
@@ -468,7 +503,7 @@ def run_condition_mininet(
     sender_summaries: dict[str, dict[str, Any]] = {}
     evaluation_metrics: dict[str, Any] = {}
     for scenario in SCENARIOS:
-        scenario_dir = ensure_dir(condition_dir / scenario)
+        scenario_dir = ensure_dir(scenario_dir_path(condition_dir, scenario))
         result = run_scenario_mininet(network, condition, scenario, args, scenario_dir)
         timeseries_frames.append(result["throughput"])
         if not result["ss"].empty:
@@ -774,7 +809,7 @@ def run_condition_synthetic(
     evaluation_metrics: dict[str, Any] = {}
     retransmission_rows = []
     for scenario in SCENARIOS:
-        scenario_dir = ensure_dir(condition_dir / scenario)
+        scenario_dir = ensure_dir(scenario_dir_path(condition_dir, scenario))
         throughput = synthetic_throughput(condition, scenario, args)
         throughput.to_csv(result_path(scenario_dir, "tcp_throughput_timeseries"), index=False)
         result_path(scenario_dir, "iperf_summary").write_text(
@@ -992,7 +1027,7 @@ def write_tcp_aggregate_outputs(output_dir: Path) -> None:
             aggregate = pd.DataFrame(columns=["condition_id", "scenario", *SS_COLUMNS])
         else:
             aggregate = pd.DataFrame()
-        aggregate.to_csv(result_path(output_dir, key), index=False)
+        aggregate.to_csv(root_result_path(output_dir, key), index=False)
 
 
 def result_path(directory: Path, key: str) -> Path:
@@ -1000,14 +1035,35 @@ def result_path(directory: Path, key: str) -> Path:
     return directory / RESULT_FILENAMES[key]
 
 
+def root_result_path(directory: Path, key: str) -> Path:
+    """Return root-level artifact paths whose numbering must not collide."""
+    return directory / ROOT_RESULT_FILENAMES.get(key, RESULT_FILENAMES[key])
+
+
 def existing_result_path(directory: Path, key: str) -> Path:
     """Return Japanese output path, falling back to a legacy English filename."""
     japanese = result_path(directory, key)
     if japanese.exists():
         return japanese
-    legacy_name = LEGACY_RESULT_FILENAMES.get(key)
-    legacy = directory / legacy_name if legacy_name else japanese
-    return legacy if legacy.exists() else japanese
+    for legacy_name in LEGACY_RESULT_FILENAMES.get(key, []):
+        legacy = directory / legacy_name
+        if legacy.exists():
+            return legacy
+    return japanese
+
+
+def scenario_dir_path(condition_dir: Path, scenario: str) -> Path:
+    """Return the unified numbered Japanese scenario directory path."""
+    return condition_dir / SCENARIO_DIR_NAMES.get(scenario, scenario)
+
+
+def existing_scenario_dir_path(condition_dir: Path, scenario: str) -> Path:
+    """Return the new scenario directory path, falling back to the old English path."""
+    current = scenario_dir_path(condition_dir, scenario)
+    if current.exists():
+        return current
+    legacy = condition_dir / scenario
+    return legacy if legacy.exists() else current
 
 
 def synthetic_throughput(
