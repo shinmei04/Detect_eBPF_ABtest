@@ -72,6 +72,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scenario", choices=SCENARIOS, required=True)
     parser.add_argument("--attack-mode", choices=ATTACK_MODES, required=True)
     parser.add_argument("--total-attack-rate-mbps", type=float, required=True)
+    parser.add_argument(
+        "--target-total-average-rate-mbps",
+        type=float,
+        help="Budget target for attack+feint average rate over the attack window.",
+    )
     parser.add_argument("--num-attack-flows", type=int, required=True)
     parser.add_argument("--burst-ms", type=int, required=True)
     parser.add_argument("--period-ms", type=int, required=True)
@@ -82,6 +87,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feint-rate-ratio", type=float, default=0.10)
     parser.add_argument("--feint-randomness", choices=["uniform", "poisson"], default="poisson")
     parser.add_argument("--attack-interval-placement", choices=["start", "end"], default="end")
+    parser.add_argument(
+        "--randomize-pulse-start",
+        action="store_true",
+        help="Randomize one aggregate pulse start within each attack period while keeping flows synchronized.",
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--log", type=Path, required=True)
     parser.add_argument("--summary-json", type=Path, required=True)
@@ -96,6 +106,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("attack_start_sec must be in [0, duration_sec)")
     if args.total_attack_rate_mbps <= 0:
         raise ValueError("total_attack_rate_mbps must be positive")
+    if args.target_total_average_rate_mbps is not None and args.target_total_average_rate_mbps <= 0:
+        raise ValueError("target_total_average_rate_mbps must be positive when supplied")
     if args.num_attack_flows <= 0:
         raise ValueError("num_attack_flows must be positive")
     if args.burst_ms <= 0 or args.period_ms <= 0 or args.burst_ms > args.period_ms:
@@ -196,20 +208,80 @@ def event_stream(args: argparse.Namespace) -> tuple[Iterable[PacketEvent], dict[
     validate_args(args)
     settings = effective_settings(args)
     num_flows = int(settings["num_attack_flows"])
-    per_flow_rate = args.total_attack_rate_mbps / num_flows
+    average_multiplier = planned_average_rate_multiplier(args, settings)
+    requested_total_attack_rate_mbps = float(args.total_attack_rate_mbps)
+    if args.target_total_average_rate_mbps is not None and average_multiplier > 0:
+        effective_total_attack_rate_mbps = float(args.target_total_average_rate_mbps) / average_multiplier
+    else:
+        effective_total_attack_rate_mbps = requested_total_attack_rate_mbps
+    per_flow_rate = effective_total_attack_rate_mbps / num_flows
+    configured_total_average = (
+        float(args.target_total_average_rate_mbps)
+        if args.target_total_average_rate_mbps is not None
+        else effective_total_attack_rate_mbps * average_multiplier
+    )
     metadata = {
         **settings,
         "scenario": args.scenario,
-        "total_attack_rate_mbps": float(args.total_attack_rate_mbps),
+        "requested_total_attack_rate_mbps": requested_total_attack_rate_mbps,
+        "total_attack_rate_mbps": float(effective_total_attack_rate_mbps),
         "per_flow_rate_mbps": float(per_flow_rate),
+        "target_total_average_rate_mbps": args.target_total_average_rate_mbps,
+        "configured_total_attack_avg_mbps": configured_total_average,
+        "planned_average_rate_multiplier": average_multiplier,
         "burst_ms": int(args.burst_ms),
         "period_ms": int(args.period_ms),
         "payload_size": int(args.payload_size),
         "feint_rate_ratio": float(args.feint_rate_ratio),
         "feint_randomness": args.feint_randomness,
         "attack_interval_placement": args.attack_interval_placement,
+        "randomize_pulse_start": bool(args.randomize_pulse_start),
     }
     return iter_scheduled_events(args, metadata), metadata
+
+
+def planned_average_rate_multiplier(args: argparse.Namespace, settings: dict[str, object]) -> float:
+    """Return attack-window average load per 1 Mbps aggregate burst rate.
+
+    For F-LDDoS this includes both attack bursts and feint traffic.  The value
+    is used to invert a configured total average budget into the aggregate
+    burst rate that should be passed to the packet scheduler.
+    """
+    attack_duration = max(0.0, args.duration_sec - args.attack_start_sec)
+    if attack_duration <= 0:
+        return 0.0
+    mode = str(settings["attack_mode"])
+    num_flows = int(settings["num_attack_flows"])
+    spread_ms = float(settings["phase_spread_ms"])
+    period_sec = args.period_ms / 1000.0
+    burst_sec = args.burst_ms / 1000.0
+    rate_seconds = 0.0
+    period_index = 0
+    period_start = args.attack_start_sec
+    while period_start < args.duration_sec:
+        period_end = min(period_start + period_sec, args.duration_sec)
+        offsets = phase_offsets_ms(mode, num_flows, spread_ms, period_index, args.seed)
+        if mode == "f_lddos":
+            attack_base = period_sec - burst_sec if args.attack_interval_placement == "end" else 0.0
+            earliest_attack = max(0.0, attack_base - max(offsets, default=0.0) / 1000.0)
+            feint_end = min(period_end, period_start + earliest_attack)
+            feint_len = max(0.0, feint_end - period_start)
+        else:
+            attack_base = 0.0
+            feint_len = 0.0
+        for flow in range(num_flows):
+            offset_sec = offsets[flow] / 1000.0
+            if mode == "f_lddos" and args.attack_interval_placement == "end":
+                attack_start = period_start + max(0.0, attack_base - offset_sec)
+            else:
+                attack_start = period_start + attack_base + offset_sec
+            attack_end = min(attack_start + burst_sec, period_end)
+            rate_seconds += max(0.0, attack_end - attack_start)
+            if mode == "f_lddos":
+                rate_seconds += args.feint_rate_ratio * feint_len
+        period_index += 1
+        period_start += period_sec
+    return rate_seconds / (num_flows * attack_duration)
 
 
 def build_events(args: argparse.Namespace) -> tuple[list[PacketEvent], dict[str, object]]:
@@ -329,6 +401,10 @@ def iter_scheduled_events(
                 )
         else:
             attack_base = 0.0
+            if args.randomize_pulse_start:
+                latest_base = max(0.0, period_sec - burst_sec)
+                attack_base = random.Random(args.seed * 1_000_003 + period_index * 10_007).uniform(0.0, latest_base)
+                offsets = [0.0] * num_flows
 
         for flow in range(num_flows):
             offset_sec = offsets[flow] / 1000.0
@@ -433,6 +509,9 @@ def send_events(
         )
         row["phase_start_sec"] = float(row["phase_start_sec"]) + phase_time_offset_sec
         row["phase_end_sec"] = float(row["phase_end_sec"]) + phase_time_offset_sec
+        if args.randomize_pulse_start and row["phase"] == "attack_burst" and not math.isnan(first):
+            row["phase_start_sec"] = first + phase_time_offset_sec
+            row["phase_end_sec"] = max(first, last) + phase_time_offset_sec
         if not math.isnan(first):
             row["first_send_sec"] = first + phase_time_offset_sec
         if not math.isnan(last):
@@ -500,6 +579,13 @@ def summarize_records(
         per_flow_attack_rates.append(rate_mbps(flow_attack_bytes, aggregate_attack_active))
         per_flow_average_rates.append(rate_mbps(flow_all_bytes, args.duration_sec))
     feint_duration = max(0.0, attack_duration - aggregate_attack_active)
+    measured_total_average = rate_mbps(attack_bytes + feint_bytes, attack_duration)
+    configured_total_average = float(metadata.get("configured_total_attack_avg_mbps") or 0.0)
+    attack_rate_error_pct = (
+        100.0 * (measured_total_average - configured_total_average) / configured_total_average
+        if configured_total_average > 0
+        else 0.0
+    )
     return {
         **metadata,
         "actual_sent_packets": int(sum(int(row["packet_count"]) for row in rows)),
@@ -510,6 +596,10 @@ def summarize_records(
         "udp_actual_per_flow_average_rate_mbps": mean(per_flow_average_rates),
         "feint_actual_rate_mbps": rate_mbps(feint_bytes, feint_duration),
         "attack_actual_rate_mbps": rate_mbps(attack_bytes, aggregate_attack_active),
+        "measured_total_attack_offered_mbps": measured_total_average,
+        "measured_total_attack_passed_mbps": "",
+        "attack_rate_error_pct": attack_rate_error_pct,
+        "attack_rate_match_status": "ok" if abs(attack_rate_error_pct) <= 10.0 else "over_budget" if attack_rate_error_pct > 0 else "under_budget",
         "attack_sent_bytes": int(attack_bytes),
         "feint_sent_bytes": int(feint_bytes),
         "duration_sec": float(args.duration_sec),

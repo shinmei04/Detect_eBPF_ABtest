@@ -111,12 +111,14 @@ Two pcaps are saved for each real case:
 - Capture B: `raw/pcaps/egress_after_bottleneck_20260610.pcap`
 
 Capture A is the `s1` side of the `s1-s2` bottleneck link.  Capture B is the
-`s2` side.  The analysis uses Capture A for offered attack load and Capture B
-for passed TCP, attack, other, and idle capacity.
+`s2` side.  The primary presentation analysis uses Capture B
+(`capture_egress_pcap`) only, filters packets in the receiver direction, and
+counts IPv4 total length (`ip.len`).  Capture A is used only to estimate offered
+attack load before the bottleneck.
 
-The pcap parser prefers tcpdump Ethernet-frame length when available.  If
-tcpdump output does not expose frame length, it falls back to transport payload
-length.  The same length source is used for all traffic classes in a run.
+Ethernet frame length (`frame.len`) is retained as a diagnostic L2 load, but it
+is not compared to the configured 15 Mbps bottleneck in presentation metrics.
+ARP and non-IPv4 traffic are excluded from the IP utilization calculation.
 
 ## Bandwidth Metrics
 
@@ -131,6 +133,13 @@ S_attack = G_attack / C * 100
 S_idle = G_idle / C * 100
 capacity_excess_mbps = max(G_total - C, 0)
 ```
+
+Here `G_TCP`, `G_attack`, and `G_other` are computed from IPv4 total length on
+the s2 side of the bottleneck.  Normal TCP includes receiver-bound TCP data
+packets, including retransmissions; ACK-only TCP packets are excluded from
+normal TCP and remain in `other` only if they are receiver-bound IPv4 packets.
+Attack traffic includes constant UDP, periodic LDoS, random microbursts,
+stat-matched LDoS, and feint packets sent to the attack UDP port.
 
 The attack evaluation interval defaults to:
 
@@ -182,6 +191,77 @@ Figures are written as PNG and PDF:
 - `03_attack_load_vs_tcp_degradation_20260610`
 - `04_excess_degradation_vs_fnr_20260610`
 - `bandwidth_share_table_20260610.md`
+
+## Existing Focused-Run Reanalysis
+
+Do not modify the original focused result directory:
+
+```text
+results_bandwidth_20260610_20260610_142643/
+```
+
+Create an archive with a symlink to the original and write recomputed outputs
+under `experiment_archive_20260610/recomputed_ip/`:
+
+```bash
+mkdir -p experiment_archive_20260610/{recomputed_l2,recomputed_ip,reports,manifests}
+ln -sfn ../results_bandwidth_20260610_20260610_142643 experiment_archive_20260610/original_focused
+python3 bandwidth_20260610_exp/recompute_bandwidth_from_pcap_20260610.py \
+  --results-dir results_bandwidth_20260610_20260610_142643 \
+  --output-dir experiment_archive_20260610/recomputed_ip \
+  --l2-output-dir experiment_archive_20260610/recomputed_l2 \
+  --reports-dir experiment_archive_20260610/reports \
+  --manifests-dir experiment_archive_20260610/manifests
+```
+
+The reanalysis writes:
+
+- `recomputed_pcap_case_bandwidth_ip_20260610.csv`
+- `recomputed_pcap_aggregated_bandwidth_ip_20260610.csv`
+- `recomputed_pcap_scenario_bandwidth_ip_20260610.csv`
+- `recomputed_bandwidth_validation_20260610.md`
+
+L2 diagnostic CSVs are written under `experiment_archive_20260610/recomputed_l2/`.
+
+## Stat-Matched Budget
+
+For `stat_matched_ldos`, the sender now treats the configured average attack
+load as a total budget:
+
+```text
+target burst average + feint average = configured_average_attack_mbps
+```
+
+The F-LDDoS sender therefore lowers the effective aggregate burst rate when a
+feint rate is enabled.  Sender summaries and recomputed pcap CSVs include:
+
+```text
+configured_total_attack_avg_mbps
+measured_total_attack_offered_mbps
+measured_total_attack_passed_mbps
+attack_rate_error_pct
+attack_rate_match_status
+```
+
+## tc/qdisc Capture
+
+Future real Mininet runs save qdisc and link state for both bottleneck
+interfaces (`s1-*` and `s2-*`) in each case:
+
+```bash
+tc -s -d qdisc show dev <iface>
+tc -s -d class show dev <iface>
+tc -s qdisc show dev <iface>
+tc -d qdisc show dev <iface>
+tc -s class show dev <iface>
+tc -d class show dev <iface>
+ip -s link show dev <iface>
+```
+
+Case metadata also records `shaping_interface`, `configured_bottleneck_mbps`,
+`configured_queue_packets`, `qdisc_kind`, `qdisc_rate`,
+`qdisc_dropped_packets`, `qdisc_overlimits`, `qdisc_requeues`, and
+`qdisc_backlog`.
 
 ## Dependencies
 
@@ -330,3 +410,145 @@ sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
 
 Changing offload settings can change the experimental condition, so the before
 and after states are saved in case metadata and raw logs.
+
+## TCP5 / Attack5 Mode 20260611
+
+The `20260611` mode keeps this experiment separate from the earlier
+unlimited-TCP runs.  Normal TCP is limited with iperf3 bitrate control, while
+the bottleneck remains 15 Mbps.  The presentation bandwidth metric is still the
+s2-side post-bottleneck pcap, receiver direction only, using IPv4 total length.
+
+Smoke:
+
+```bash
+sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
+  --tcp5-attack5-smoke \
+  --existing-repo-dir "$PWD"
+```
+
+Focused, to run only after smoke passes:
+
+```bash
+sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
+  --tcp5-attack5-focused \
+  --existing-repo-dir "$PWD"
+```
+
+Defaults for this mode:
+
+```text
+bottleneck = 15 Mbps
+normal TCP target = 5 Mbps, 1 iperf3 TCP flow
+attack peak = 15 Mbps
+period = 1000 ms
+burst = 333.333 ms
+average attack rate = about 5 Mbps
+bucket = 25 ms
+TCP_INFO interval = 50 ms
+```
+
+Smoke uses seed 1, duration 20 seconds, attack start 5 seconds, and evaluation
+window 7 to 18 seconds.  Focused uses seeds 1 through 5, duration 60 seconds,
+attack start 20 seconds, and evaluation window 25 to 55 seconds.
+
+The no-attack seed is validated before attack cases run.  The seed is accepted
+when iperf3 receiver TCP is within 10% of 5 Mbps, with `matched` reported for
+within 5%, `warning` for 5 to 10%, and `failed` above 10%.  Failed seeds are
+not used for attack cases.
+
+Outputs are written under:
+
+```text
+results_tcp5_attack5_20260611_<timestamp>/
+```
+
+Key outputs include:
+
+```text
+csv/case_metrics_20260611.csv
+csv/bandwidth_timeseries_20260611.csv
+csv/cycle_bandwidth_metrics_20260611.csv
+csv/attack_rate_validation_20260611.csv
+csv/tcp_rate_validation_20260611.csv
+csv/rto_events_20260611.csv
+csv/detector_metrics_20260611.csv
+csv/aggregated_metrics_20260611.csv
+summary_for_chatgpt_20260611.md
+ldos_tcp5_attack5_chatgpt_compact_20260611_<timestamp>.zip
+```
+
+## RTO Calibration Grid 20260611
+
+The RTO calibration modes reuse the TCP5/Attack5 machinery but vary the LDoS
+peak rate and the s1-side bottleneck queue limit to find the smallest condition
+that produces this chain:
+
+```text
+attack pulse -> qdisc drop -> TCP retransmission or RTO/backoff -> TCP loss
+```
+
+Only `no_attack` and `periodic_ldos` are run.  Fixed settings:
+
+```text
+bottleneck = 15 Mbps
+normal TCP target = 5 Mbps, 1 iperf3 TCP flow
+average offered attack = 5 Mbps
+period = 1000 ms
+seed = 1
+duration = 20 seconds
+attack start = 5 seconds
+evaluation = 7 <= t < 18
+bucket = 25 ms
+TCP_INFO interval = 50 ms
+```
+
+The grid is:
+
+```text
+peak = 15, 30, 45, 60 Mbps
+queue = 50, 100, 200 packets
+burst_ms = 1000 * 5 / peak
+```
+
+Smoke runs only `peak=30 Mbps, queue=100 packets`:
+
+```bash
+sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
+  --rto-calibration-smoke \
+  --existing-repo-dir "$PWD"
+```
+
+Run the full 12-condition grid only after smoke passes:
+
+```bash
+sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
+  --rto-calibration-grid \
+  --existing-repo-dir "$PWD"
+```
+
+Each RTO calibration run writes:
+
+```text
+results_rto_calibration_20260611_<timestamp>/
+```
+
+Major outputs:
+
+```text
+csv/case_metrics_20260611.csv
+csv/qdisc_metrics_20260611.csv
+csv/retransmission_events_20260611.csv
+csv/rto_events_20260611.csv
+csv/detector_metrics_20260611.csv
+csv/ranking_20260611.csv
+figures/01_peak_queue_heatmap_20260611.png/.pdf
+figures/02_best_condition_timeseries_20260611.png/.pdf
+rto_calibration_chatgpt_compact_20260611_<timestamp>.zip
+```
+
+The attack rate validity check uses the s1-side offered attack rate, not the
+s2-side passed rate, because qdisc drops are part of the condition being tested.
+The main bandwidth and TCP degradation metrics still use the s2-side pcap,
+receiver direction, and IPv4 total length.  `tshark` retransmission labels are
+kept separate from direct TCP_INFO RTO/backoff observations; if `tshark` is not
+installed, retransmission status is recorded as `unavailable`.

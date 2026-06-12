@@ -6,6 +6,8 @@ __pycache__/
 results/
 results_*/
 results_mininet_ab/
+experiment_archive_*/
+local_experiment_workspace/
 *.pcap
 *.log
 *.tmp

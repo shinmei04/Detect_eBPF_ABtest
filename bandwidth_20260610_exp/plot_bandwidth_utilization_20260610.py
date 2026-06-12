@@ -124,7 +124,7 @@ def plot_timeseries(rows: list[dict[str, str]], output_dir: Path, metadata: dict
         meta = metadata.get((condition, scenario, seed), {})
         attack_start = to_float(meta.get("attack_start_sec"), default_attack_start)
         bottleneck = to_float(meta.get("bottleneck_mbps"), default_c)
-        title = f"Bandwidth timeseries {condition} {scenario} seed {seed}"
+        title = f"IPv4 bandwidth timeseries {condition} {scenario} seed {seed}"
         base = output_dir / f"01_bandwidth_timeseries_{slug(condition)}_{slug(scenario)}_seed{slug(seed)}_20260610"
         if plt is None:
             save_fig(None, base, title)
@@ -156,6 +156,7 @@ def plot_timeseries(rows: list[dict[str, str]], output_dir: Path, metadata: dict
         axes[1].set_xlabel("Time [sec]")
         axes[1].set_ylabel("Capacity share [%]")
         axes[1].legend(loc="upper right", fontsize=8)
+        fig.text(0.01, 0.01, "Measured at the s2 side of the bottleneck using IPv4 total length", fontsize=8)
         save_fig(plt, base, title)
 
 
@@ -175,7 +176,7 @@ def plot_share_stacked(case_rows: list[dict[str, str]], output_dir: Path, plt: A
     metrics = ["tcp_share_pct", "attack_share_pct", "other_share_pct", "idle_share_pct"]
     rows = average_by_group(case_rows, ["condition_id", "scenario"], metrics)
     base = output_dir / "02_bandwidth_share_stacked_20260610"
-    title = "Average bottleneck capacity share"
+    title = "Average bottleneck capacity share (IPv4 total length at s2)"
     if plt is None:
         save_fig(None, base, title)
         return
@@ -194,6 +195,7 @@ def plot_share_stacked(case_rows: list[dict[str, str]], output_dir: Path, plt: A
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
     ax.legend(loc="upper right")
+    fig.text(0.01, 0.01, "Measured at the s2 side of the bottleneck using IPv4 total length", fontsize=8)
     save_fig(plt, base, title)
 
 

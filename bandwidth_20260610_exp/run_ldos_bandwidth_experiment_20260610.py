@@ -17,6 +17,7 @@ import math
 import os
 import platform
 import random
+import re
 import shlex
 import shutil
 import subprocess
@@ -69,6 +70,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tcp-info-interval-ms", type=float, default=50.0)
     parser.add_argument("--disable-tcp-info", action="store_true")
     parser.add_argument("--disable-offloads", action="store_true")
+    parser.add_argument("--tcp-target-mbps", type=float)
+    parser.add_argument("--tcp-pacing-timer-us", type=int)
+    parser.add_argument("--queue-limit-packets", type=int)
+    parser.add_argument("--output-tag", default="20260610")
     parser.add_argument("--existing-repo-dir", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--synthetic-test", action="store_true")
@@ -90,6 +95,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--payload-size must be positive")
     if args.tcp_info_interval_ms <= 0:
         raise SystemExit("--tcp-info-interval-ms must be positive")
+    if args.tcp_target_mbps is not None and args.tcp_target_mbps <= 0:
+        raise SystemExit("--tcp-target-mbps must be positive when supplied")
+    if args.tcp_pacing_timer_us is not None and args.tcp_pacing_timer_us <= 0:
+        raise SystemExit("--tcp-pacing-timer-us must be positive when supplied")
+    if args.queue_limit_packets is not None and args.queue_limit_packets <= 0:
+        raise SystemExit("--queue-limit-packets must be positive when supplied")
     if args.configured_average_attack_mbps is None:
         args.configured_average_attack_mbps = average_attack_rate_mbps(args.peak_rate_mbps, args.burst_ms, args.period_ms)
     if args.duty_ratio is None:
@@ -124,8 +135,8 @@ def ensure_case_dirs(output_dir: Path, case_id: str) -> Path:
     return case_dir
 
 
-def write_metadata(case_dir: Path, metadata: dict[str, Any]) -> None:
-    (case_dir / "metadata_20260610.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+def write_metadata(case_dir: Path, metadata: dict[str, Any], output_tag: str = "20260610") -> None:
+    (case_dir / f"metadata_{output_tag}.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
 
 def base_metadata(args: argparse.Namespace, case_dir: Path) -> dict[str, Any]:
@@ -144,6 +155,7 @@ def base_metadata(args: argparse.Namespace, case_dir: Path) -> dict[str, Any]:
         "period_ms": args.period_ms,
         "duty_ratio": args.duty_ratio,
         "configured_average_attack_mbps": args.configured_average_attack_mbps,
+        "configured_total_attack_avg_mbps": args.configured_average_attack_mbps,
         "configured_average_attack_pct": configured_average_attack_pct(
             args.configured_average_attack_mbps, args.bottleneck_mbps
         ),
@@ -154,9 +166,19 @@ def base_metadata(args: argparse.Namespace, case_dir: Path) -> dict[str, Any]:
         "evaluation_end_sec": args.evaluation_end_sec,
         "payload_size": args.payload_size,
         "num_attack_flows": args.num_attack_flows,
+        "tcp_sender_ip": "10.0.0.1",
+        "receiver_ip": "10.0.0.2",
+        "attacker_ips": ["10.0.0.3", "10.0.0.4"],
+        "iperf_port": 5201,
+        "attack_udp_port": 5001,
         "tcp_info_interval_ms": args.tcp_info_interval_ms,
         "tcp_info_enabled": not args.disable_tcp_info,
         "disable_offloads": args.disable_offloads,
+        "output_tag": args.output_tag,
+        "tcp_target_mbps": args.tcp_target_mbps,
+        "tcp_limit_method": "iperf3_bitrate" if args.tcp_target_mbps else "unlimited_iperf3_tcp",
+        "tcp_pacing_timer_us": args.tcp_pacing_timer_us,
+        "configured_queue_packets": args.queue_limit_packets,
         "command": shell_join(sys.argv),
         "cwd": str(Path.cwd()),
         "python_version": sys.version,
@@ -171,7 +193,7 @@ def bytes_for_rate(rate_mbps: float, bucket_sec: float) -> int:
 
 
 def synthetic_rates(args: argparse.Namespace, bucket_start: float, rng: random.Random) -> tuple[float, float, float, bool]:
-    baseline_tcp = args.bottleneck_mbps * 0.90
+    baseline_tcp = args.tcp_target_mbps if args.tcp_target_mbps else args.bottleneck_mbps * 0.90
     avg_attack = args.configured_average_attack_mbps
     active = bucket_start >= args.attack_start_sec
     period_sec = args.period_ms / 1000.0
@@ -182,21 +204,21 @@ def synthetic_rates(args: argparse.Namespace, bucket_start: float, rng: random.R
         return baseline_tcp + rng.uniform(-0.08, 0.08), 0.0, 0.03, False
     if args.scenario == "constant_udp":
         attack = avg_attack
-        tcp = baseline_tcp - avg_attack * 0.75 + rng.uniform(-0.08, 0.08)
+        tcp = baseline_tcp - min(avg_attack * 0.35, baseline_tcp * 0.45) + rng.uniform(-0.08, 0.08)
         return max(tcp, 0.2), attack, 0.04, False
     if args.scenario == "random_microburst":
         random_burst = rng.random() < args.duty_ratio
         attack = args.peak_rate_mbps if random_burst else 0.0
-        tcp = baseline_tcp - avg_attack * 1.10 - (args.peak_rate_mbps * 0.05 if random_burst else 0.0)
+        tcp = baseline_tcp - min(avg_attack * 0.55, baseline_tcp * 0.65) - (args.peak_rate_mbps * 0.03 if random_burst else 0.0)
         return max(tcp + rng.uniform(-0.15, 0.15), 0.2), attack, 0.05, random_burst
     if args.scenario == "periodic_ldos":
         attack = args.peak_rate_mbps if periodic_burst else 0.0
-        recovery_penalty = avg_attack * 1.60
-        burst_penalty = args.peak_rate_mbps * 0.08 if periodic_burst else 0.0
+        recovery_penalty = min(avg_attack * 0.75, baseline_tcp * 0.75)
+        burst_penalty = args.peak_rate_mbps * 0.03 if periodic_burst else 0.0
         return max(baseline_tcp - recovery_penalty - burst_penalty + rng.uniform(-0.12, 0.12), 0.2), attack, 0.05, periodic_burst
     attack = args.peak_rate_mbps if periodic_burst else avg_attack * 0.08
-    recovery_penalty = avg_attack * 1.50
-    burst_penalty = args.peak_rate_mbps * 0.06 if periodic_burst else 0.0
+    recovery_penalty = min(avg_attack * 0.65, baseline_tcp * 0.70)
+    burst_penalty = args.peak_rate_mbps * 0.025 if periodic_burst else 0.0
     return max(baseline_tcp - recovery_penalty - burst_penalty + rng.uniform(-0.12, 0.12), 0.2), attack, 0.05, periodic_burst
 
 
@@ -250,8 +272,8 @@ def synthetic_pulses(args: argparse.Namespace) -> list[dict[str, Any]]:
     return pulses
 
 
-def write_pulses(case_dir: Path, pulses: list[dict[str, Any]]) -> None:
-    path = case_dir / "raw" / "pulses" / "attack_pulses_20260610.csv"
+def write_pulses(case_dir: Path, pulses: list[dict[str, Any]], output_tag: str = "20260610") -> None:
+    path = case_dir / "raw" / "pulses" / f"attack_pulses_{output_tag}.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "pulse_index",
@@ -300,9 +322,9 @@ def synthetic_rto_state(args: argparse.Namespace, sample_sec: float, pulses: lis
 def write_synthetic_tcp_info(case_dir: Path, args: argparse.Namespace, pulses: list[dict[str, Any]]) -> None:
     tcp_dir = case_dir / "raw" / "tcp_info" / args.case_id
     tcp_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = tcp_dir / "tcp_info_timeseries_20260610.csv"
-    raw_path = tcp_dir / "ss_raw_20260610.log"
-    metrics_path = tcp_dir / "sampler_metrics_20260610.txt"
+    csv_path = tcp_dir / f"tcp_info_timeseries_{args.output_tag}.csv"
+    raw_path = tcp_dir / f"ss_raw_{args.output_tag}.log"
+    metrics_path = tcp_dir / f"sampler_metrics_{args.output_tag}.txt"
     interval_sec = args.tcp_info_interval_ms / 1000.0
     steps = int(math.ceil(args.duration_sec / interval_sec))
     fields = [
@@ -395,7 +417,7 @@ def write_synthetic_tcp_info(case_dir: Path, args: argparse.Namespace, pulses: l
     metrics_path.write_text(
         "\n".join(
             [
-                "created_date=2026-06-10",
+                f"created_date={args.output_tag[:4]}-{args.output_tag[4:6]}-{args.output_tag[6:8]}",
                 "purpose=25 ms detector window comparison experiment",
                 f"case_id={args.case_id}",
                 f"sample_count={len(rows)}",
@@ -414,7 +436,7 @@ def write_synthetic_tcp_info(case_dir: Path, args: argparse.Namespace, pulses: l
 
 
 def write_synthetic_retransmissions(case_dir: Path, args: argparse.Namespace, pulses: list[dict[str, Any]]) -> None:
-    path = case_dir / "raw" / "tcp_retransmission_events_20260610.csv"
+    path = case_dir / "raw" / f"tcp_retransmission_events_{args.output_tag}.csv"
     fields = [
         "timestamp_sec",
         "timestamp_epoch_ns",
@@ -483,6 +505,21 @@ def write_synthetic_retransmissions(case_dir: Path, args: argparse.Namespace, pu
         writer.writerows(rows)
 
 
+def write_synthetic_iperf_json(case_dir: Path, args: argparse.Namespace, tcp_mbps_values: list[float]) -> None:
+    receiver_mbps = sum(tcp_mbps_values) / len(tcp_mbps_values) if tcp_mbps_values else 0.0
+    path = case_dir / "raw" / "iperf" / f"iperf_client_{args.output_tag}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "start": {"test_start": {"protocol": "TCP", "num_streams": 1}},
+        "end": {
+            "sum_received": {"bits_per_second": receiver_mbps * 1_000_000.0},
+            "sum_sent": {"bits_per_second": receiver_mbps * 1_000_000.0},
+            "streams": [{"receiver": {"bits_per_second": receiver_mbps * 1_000_000.0}}],
+        },
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def run_synthetic_case(args: argparse.Namespace, case_dir: Path, metadata: dict[str, Any]) -> None:
     stable_case_hash = sum((idx + 1) * ord(ch) for idx, ch in enumerate(args.case_id)) % 9973
     rng = random.Random(args.seed * 100003 + stable_case_hash)
@@ -490,10 +527,12 @@ def run_synthetic_case(args: argparse.Namespace, case_dir: Path, metadata: dict[
     steps = int(math.ceil(args.duration_sec / bucket_sec))
     packet_rows: list[dict[str, Any]] = []
     detector_rows: list[dict[str, Any]] = []
+    tcp_mbps_values: list[float] = []
     pulses = synthetic_pulses(args)
     for index in range(steps):
         ts = round(index * bucket_sec, 9)
         tcp_mbps, attack_mbps, other_mbps, burst_active = synthetic_rates(args, ts, rng)
+        tcp_mbps_values.append(tcp_mbps)
         attack_active = int(ts >= args.attack_start_sec and args.scenario != "no_attack")
         passed_attack_mbps = min(attack_mbps * 0.94, max(args.bottleneck_mbps - 0.3, 0.0)) if attack_active else 0.0
         offered_attack_mbps = attack_mbps if attack_active else 0.0
@@ -543,11 +582,11 @@ def run_synthetic_case(args: argparse.Namespace, case_dir: Path, metadata: dict[
             }
         )
 
-    with (case_dir / "raw" / "synthetic_packets_20260610.csv").open("w", newline="") as f:
+    with (case_dir / "raw" / f"synthetic_packets_{args.output_tag}.csv").open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["timestamp_sec", "capture", "class", "bytes"])
         writer.writeheader()
         writer.writerows(packet_rows)
-    with (case_dir / "raw" / "detector" / "detector_windows_20260610.csv").open("w", newline="") as f:
+    with (case_dir / "raw" / "detector" / f"detector_windows_{args.output_tag}.csv").open("w", newline="") as f:
         writer = csv.DictWriter(
             f,
             fieldnames=[
@@ -565,10 +604,11 @@ def run_synthetic_case(args: argparse.Namespace, case_dir: Path, metadata: dict[
         )
         writer.writeheader()
         writer.writerows(detector_rows)
-    write_pulses(case_dir, pulses)
+    write_pulses(case_dir, pulses, args.output_tag)
     if not args.disable_tcp_info:
         write_synthetic_tcp_info(case_dir, args, pulses)
     write_synthetic_retransmissions(case_dir, args, pulses)
+    write_synthetic_iperf_json(case_dir, args, tcp_mbps_values)
     metadata.update(
         {
             "mode": "synthetic-test",
@@ -657,7 +697,7 @@ def run_host_background(host: Any, command: list[Any], log_path: Path) -> Any:
     return host.popen([str(item) for item in command], stdout=log, stderr=subprocess.STDOUT)
 
 
-def collect_offload_settings(ifaces: list[str], case_dir: Path, disable_offloads: bool) -> dict[str, Any]:
+def collect_offload_settings(ifaces: list[str], case_dir: Path, disable_offloads: bool, output_tag: str = "20260610") -> dict[str, Any]:
     settings: dict[str, Any] = {}
     ethtool = shutil.which("ethtool")
     if ethtool is None:
@@ -668,13 +708,131 @@ def collect_offload_settings(ifaces: list[str], case_dir: Path, disable_offloads
     offload_dir.mkdir(parents=True, exist_ok=True)
     for iface in ifaces:
         before = subprocess.run([ethtool, "-k", iface], text=True, capture_output=True, check=False)
-        (offload_dir / f"offload_{iface}_before_20260610.txt").write_text(before.stdout + before.stderr, encoding="utf-8")
+        (offload_dir / f"offload_{iface}_before_{output_tag}.txt").write_text(before.stdout + before.stderr, encoding="utf-8")
         if disable_offloads:
             subprocess.run([ethtool, "-K", iface, "tso", "off", "gso", "off", "gro", "off"], text=True, capture_output=True, check=False)
         after = subprocess.run([ethtool, "-k", iface], text=True, capture_output=True, check=False)
-        (offload_dir / f"offload_{iface}_after_20260610.txt").write_text(after.stdout + after.stderr, encoding="utf-8")
-        settings[iface] = {"before_file": str(offload_dir / f"offload_{iface}_before_20260610.txt"), "after_file": str(offload_dir / f"offload_{iface}_after_20260610.txt")}
+        (offload_dir / f"offload_{iface}_after_{output_tag}.txt").write_text(after.stdout + after.stderr, encoding="utf-8")
+        settings[iface] = {
+            "before_file": str(offload_dir / f"offload_{iface}_before_{output_tag}.txt"),
+            "after_file": str(offload_dir / f"offload_{iface}_after_{output_tag}.txt"),
+        }
     return settings
+
+
+def parse_tc_summary(text: str) -> dict[str, Any]:
+    qdisc_match = re.search(r"\bqdisc\s+(\S+)", text)
+    rate_match = re.search(r"\brate\s+([0-9.]+\s*[kKmMgG]?bit)", text)
+    dropped = sum(int(value) for value in re.findall(r"\bdropped\s+(\d+)", text))
+    overlimits = sum(int(value) for value in re.findall(r"\boverlimits\s+(\d+)", text))
+    requeues = sum(int(value) for value in re.findall(r"\brequeues\s+(\d+)\)", text))
+    backlog_match = re.search(r"\bbacklog\s+([^\n]+)", text)
+    return {
+        "qdisc_kind": qdisc_match.group(1) if qdisc_match else "",
+        "qdisc_rate": rate_match.group(1).replace(" ", "") if rate_match else "",
+        "qdisc_dropped_packets": dropped,
+        "qdisc_overlimits": overlimits,
+        "qdisc_requeues": requeues,
+        "backlog": backlog_match.group(1).strip() if backlog_match else "",
+    }
+
+
+def configure_bottleneck_qdisc(iface: str, bottleneck_mbps: float, queue_limit_packets: int | None) -> dict[str, Any]:
+    if queue_limit_packets is None:
+        return {"configured": False}
+    commands = [
+        (["tc", "qdisc", "del", "dev", iface, "root"], True),
+        (["tc", "qdisc", "add", "dev", iface, "root", "handle", "5:", "htb", "default", "1"], False),
+        (
+            [
+                "tc",
+                "class",
+                "add",
+                "dev",
+                iface,
+                "parent",
+                "5:",
+                "classid",
+                "5:1",
+                "htb",
+                "rate",
+                f"{bottleneck_mbps}mbit",
+                "ceil",
+                f"{bottleneck_mbps}mbit",
+            ],
+            False,
+        ),
+        (
+            [
+                "tc",
+                "qdisc",
+                "add",
+                "dev",
+                iface,
+                "parent",
+                "5:1",
+                "handle",
+                "10:",
+                "netem",
+                "limit",
+                str(queue_limit_packets),
+                "delay",
+                "20ms",
+            ],
+            False,
+        ),
+    ]
+    outputs = []
+    for command, allow_failure in commands:
+        proc = subprocess.run(command, text=True, capture_output=True, check=False)
+        outputs.append({"command": shell_join(command), "returncode": proc.returncode, "output": proc.stdout + proc.stderr})
+        if proc.returncode != 0 and not allow_failure:
+            raise RuntimeError(f"Failed to configure qdisc on {iface}: {proc.stdout}{proc.stderr}".strip())
+    return {
+        "configured": True,
+        "interface": iface,
+        "rate_mbps": bottleneck_mbps,
+        "queue_limit_packets": queue_limit_packets,
+        "commands": outputs,
+    }
+
+
+def collect_tc_qdisc_state(ifaces: list[str], case_dir: Path, bottleneck_mbps: float, label: str, output_tag: str = "20260610") -> dict[str, Any]:
+    state_dir = case_dir / "raw" / "tc_qdisc"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    commands = [
+        ("tc_s_d_qdisc_show", ["tc", "-s", "-d", "qdisc", "show", "dev"]),
+        ("tc_s_d_class_show", ["tc", "-s", "-d", "class", "show", "dev"]),
+        ("tc_s_qdisc_show", ["tc", "-s", "qdisc", "show", "dev"]),
+        ("tc_d_qdisc_show", ["tc", "-d", "qdisc", "show", "dev"]),
+        ("tc_s_class_show", ["tc", "-s", "class", "show", "dev"]),
+        ("tc_d_class_show", ["tc", "-d", "class", "show", "dev"]),
+        ("ip_s_link_show", ["ip", "-s", "link", "show", "dev"]),
+    ]
+    output: dict[str, Any] = {
+        "label": label,
+        "configured_bottleneck_mbps": bottleneck_mbps,
+        "interfaces": {},
+    }
+    for iface in ifaces:
+        iface_summary: dict[str, Any] = {"files": {}}
+        command_outputs: dict[str, str] = {}
+        for name, prefix in commands:
+            path = state_dir / f"{name}_{iface}_{label}_{output_tag}.txt"
+            proc = subprocess.run([*prefix, iface], text=True, capture_output=True, check=False)
+            text = proc.stdout + proc.stderr
+            path.write_text(text, encoding="utf-8")
+            iface_summary["files"][name] = str(path)
+            command_outputs[name] = text
+        qdisc_text = command_outputs.get("tc_s_d_qdisc_show") or command_outputs.get("tc_s_qdisc_show", "")
+        class_text = command_outputs.get("tc_s_d_class_show") or command_outputs.get("tc_s_class_show", "")
+        qdisc_summary = parse_tc_summary(qdisc_text)
+        class_summary = parse_tc_summary(class_text)
+        if class_summary.get("qdisc_rate"):
+            qdisc_summary["qdisc_rate"] = class_summary["qdisc_rate"]
+        iface_summary.update(qdisc_summary)
+        output["interfaces"][iface] = iface_summary
+    return output
 
 
 def start_tcp_info_collector(host: Any, args: argparse.Namespace, case_dir: Path, start_epoch_ns: int) -> Any:
@@ -704,14 +862,14 @@ def start_tcp_info_collector(host: Any, args: argparse.Namespace, case_dir: Path
             "--time-origin-epoch-ns",
             start_epoch_ns,
             "--csv-output",
-            tcp_dir / "tcp_info_timeseries_20260610.csv",
+            tcp_dir / f"tcp_info_timeseries_{args.output_tag}.csv",
             "--raw-log",
-            tcp_dir / "ss_raw_20260610.log",
+            tcp_dir / f"ss_raw_{args.output_tag}.log",
             "--sampler-metrics-output",
-            tcp_dir / "sampler_metrics_20260610.txt",
+            tcp_dir / f"sampler_metrics_{args.output_tag}.txt",
             "--allow-unfiltered-fallback",
         ],
-        case_dir / "logs" / "tcp_info_collector_20260610.log",
+        case_dir / "logs" / f"tcp_info_collector_{args.output_tag}.log",
     )
 
 
@@ -736,13 +894,14 @@ def write_real_pulses_from_sender_logs(case_dir: Path, args: argparse.Namespace,
                         "actual_sent_bytes": "",
                     }
                 ],
+                args.output_tag,
             )
         else:
-            write_pulses(case_dir, [])
+            write_pulses(case_dir, [], args.output_tag)
         return
-    log_path = case_dir / "raw" / "composite_sender_log_20260610.csv"
+    log_path = case_dir / "raw" / f"composite_sender_log_{args.output_tag}.csv"
     if not log_path.exists():
-        write_pulses(case_dir, synthetic_pulses(args))
+        write_pulses(case_dir, synthetic_pulses(args), args.output_tag)
         return
     with log_path.open(newline="") as f:
         rows = [row for row in csv.DictReader(f) if row.get("phase") == "attack_burst"]
@@ -777,7 +936,7 @@ def write_real_pulses_from_sender_logs(case_dir: Path, args: argparse.Namespace,
                 "actual_sent_bytes": bytes_sent,
             }
         )
-    write_pulses(case_dir, pulses)
+    write_pulses(case_dir, pulses, args.output_tag)
 
 
 def run_attack_sender(host: Any, args: argparse.Namespace, case_dir: Path, existing_repo: Path, experiment_start_wall: float) -> Any:
@@ -805,11 +964,11 @@ def run_attack_sender(host: Any, args: argparse.Namespace, case_dir: Path, exist
                 "--payload-size",
                 args.payload_size,
                 "--log",
-                case_dir / "raw" / "constant_udp_send_log_20260610.csv",
+                case_dir / "raw" / f"constant_udp_send_log_{args.output_tag}.csv",
                 "--summary-json",
-                case_dir / "raw" / "constant_udp_summary_20260610.json",
+                case_dir / "raw" / f"constant_udp_summary_{args.output_tag}.json",
             ],
-            log_dir / "constant_udp_sender_20260610.log",
+            log_dir / f"constant_udp_sender_{args.output_tag}.log",
         )
 
     sender_scenario = SCENARIO_MAP[args.scenario]
@@ -820,9 +979,10 @@ def run_attack_sender(host: Any, args: argparse.Namespace, case_dir: Path, exist
     feint_rate_ratio = 0.0
     attack_interval_placement = "start"
     if args.scenario == "random_microburst":
-        attack_mode = "multi_flow_randomized_lddos"
+        sender_scenario = "composite_lddos"
+        attack_mode = "multi_flow_sync_lddos"
         jitter_ratio = 0.5
-        phase_spread_ms = args.burst_ms
+        phase_spread_ms = 0.0
     elif args.scenario == "stat_matched_ldos":
         attack_mode = "f_lddos"
         payload_mode = "empirical"
@@ -831,55 +991,61 @@ def run_attack_sender(host: Any, args: argparse.Namespace, case_dir: Path, exist
         feint_rate_ratio = 0.10
         attack_interval_placement = "end"
 
+    command = [
+        sys.executable,
+        existing_repo / "mininet_experiment" / "traffic_generators" / "send_composite_lddos.py",
+        "--dst-ip",
+        "10.0.0.2",
+        "--dst-port",
+        "5001",
+        "--base-src-port",
+        "40000",
+        "--duration-sec",
+        args.duration_sec,
+        "--attack-start-sec",
+        args.attack_start_sec,
+        "--experiment-start-wall",
+        experiment_start_wall,
+        "--scenario",
+        sender_scenario,
+        "--attack-mode",
+        attack_mode,
+        "--total-attack-rate-mbps",
+        args.peak_rate_mbps,
+        "--num-attack-flows",
+        args.num_attack_flows,
+        "--burst-ms",
+        int(round(args.burst_ms)),
+        "--period-ms",
+        int(round(args.period_ms)),
+        "--payload-size",
+        args.payload_size,
+        "--payload-mode",
+        payload_mode,
+        "--phase-spread-ms",
+        phase_spread_ms,
+        "--jitter-ratio",
+        jitter_ratio,
+        "--feint-rate-ratio",
+        feint_rate_ratio,
+        "--attack-interval-placement",
+        attack_interval_placement,
+        "--seed",
+        args.seed,
+        "--log",
+        case_dir / "raw" / f"composite_sender_log_{args.output_tag}.csv",
+        "--summary-json",
+        case_dir / "raw" / f"composite_sender_summary_{args.output_tag}.json",
+    ]
+    if args.scenario == "stat_matched_ldos":
+        command.extend(["--target-total-average-rate-mbps", args.configured_average_attack_mbps])
+    if args.scenario == "random_microburst":
+        command.append("--randomize-pulse-start")
+
     return run_host_background(
         host,
-        [
-            sys.executable,
-            existing_repo / "mininet_experiment" / "traffic_generators" / "send_composite_lddos.py",
-            "--dst-ip",
-            "10.0.0.2",
-            "--dst-port",
-            "5001",
-            "--base-src-port",
-            "40000",
-            "--duration-sec",
-            args.duration_sec,
-            "--attack-start-sec",
-            args.attack_start_sec,
-            "--experiment-start-wall",
-            experiment_start_wall,
-            "--scenario",
-            sender_scenario,
-            "--attack-mode",
-            attack_mode,
-            "--total-attack-rate-mbps",
-            args.peak_rate_mbps,
-            "--num-attack-flows",
-            args.num_attack_flows,
-            "--burst-ms",
-            int(round(args.burst_ms)),
-            "--period-ms",
-            int(round(args.period_ms)),
-            "--payload-size",
-            args.payload_size,
-            "--payload-mode",
-            payload_mode,
-            "--phase-spread-ms",
-            phase_spread_ms,
-            "--jitter-ratio",
-            jitter_ratio,
-            "--feint-rate-ratio",
-            feint_rate_ratio,
-            "--attack-interval-placement",
-            attack_interval_placement,
-            "--seed",
-            args.seed,
-            "--log",
-            case_dir / "raw" / "composite_sender_log_20260610.csv",
-            "--summary-json",
-            case_dir / "raw" / "composite_sender_summary_20260610.json",
-        ],
-        log_dir / "composite_sender_20260610.log",
+        command,
+        log_dir / f"composite_sender_{args.output_tag}.log",
     )
 
 
@@ -887,7 +1053,7 @@ def write_detector_from_existing(case_dir: Path, args: argparse.Namespace, exist
     if args.scenario == "no_attack":
         write_empty_detector(case_dir, args)
         return
-    pcap = case_dir / "raw" / "pcaps" / "egress_after_bottleneck_20260610.pcap"
+    pcap = case_dir / "raw" / "pcaps" / f"egress_after_bottleneck_{args.output_tag}.pcap"
     if not pcap.exists():
         write_empty_detector(case_dir, args)
         return
@@ -908,15 +1074,15 @@ def write_detector_from_existing(case_dir: Path, args: argparse.Namespace, exist
         attack_start_sec=args.attack_start_sec,
         time_origin_sec=time_origin_sec,
         dst_port=5001,
-        phase_intervals=case_dir / "raw" / "composite_sender_log_20260610.csv"
-        if (case_dir / "raw" / "composite_sender_log_20260610.csv").exists()
+        phase_intervals=case_dir / "raw" / f"composite_sender_log_{args.output_tag}.csv"
+        if (case_dir / "raw" / f"composite_sender_log_{args.output_tag}.csv").exists()
         else None,
         min_overlap_sec=args.bucket_ms / 1000.0,
     )
     predictions = PaperReproductionDetector(
         PaperDetectorConfig(warmup_windows=0, min_packets_for_detection=1, suspicious_threshold=2)
     ).predict_stream(features)
-    out = case_dir / "raw" / "detector" / "detector_windows_20260610.csv"
+    out = case_dir / "raw" / "detector" / f"detector_windows_{args.output_tag}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", newline="") as f:
         fields = [
@@ -954,7 +1120,7 @@ def write_detector_from_existing(case_dir: Path, args: argparse.Namespace, exist
 def write_empty_detector(case_dir: Path, args: argparse.Namespace) -> None:
     bucket_sec = args.bucket_ms / 1000.0
     steps = int(math.ceil(args.duration_sec / bucket_sec))
-    out = case_dir / "raw" / "detector" / "detector_windows_20260610.csv"
+    out = case_dir / "raw" / "detector" / f"detector_windows_{args.output_tag}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", newline="") as f:
         writer = csv.DictWriter(
@@ -1006,6 +1172,8 @@ def run_real_case(args: argparse.Namespace, case_dir: Path, metadata: dict[str, 
     ingress_tcpdump = None
     egress_tcpdump = None
     tcp_info_collector = None
+    tc_state_before: dict[str, Any] = {}
+    tc_state_after: dict[str, Any] = {}
     experiment_start_wall = time.time()
     case_start_epoch_ns = time.time_ns()
     case_start_monotonic_ns = time.monotonic_ns()
@@ -1014,13 +1182,15 @@ def run_real_case(args: argparse.Namespace, case_dir: Path, metadata: dict[str, 
         network.start()
         h1, h2, h3 = [network.get(name) for name in ("h1", "h2", "h3")]
         ingress_iface, egress_iface = find_bottleneck_ifaces(network, args)
-        offload_settings = collect_offload_settings([ingress_iface, egress_iface], case_dir, args.disable_offloads)
-        ingress_pcap = case_dir / "raw" / "pcaps" / "ingress_before_bottleneck_20260610.pcap"
-        egress_pcap = case_dir / "raw" / "pcaps" / "egress_after_bottleneck_20260610.pcap"
-        ingress_tcpdump = start_root_tcpdump(ingress_iface, ingress_pcap, case_dir / "raw" / "tcpdump" / "ingress_20260610.log")
-        egress_tcpdump = start_root_tcpdump(egress_iface, egress_pcap, case_dir / "raw" / "tcpdump" / "egress_20260610.log")
+        offload_settings = collect_offload_settings([ingress_iface, egress_iface], case_dir, args.disable_offloads, args.output_tag)
+        qdisc_config = configure_bottleneck_qdisc(ingress_iface, args.bottleneck_mbps, args.queue_limit_packets)
+        tc_state_before = collect_tc_qdisc_state([ingress_iface, egress_iface], case_dir, args.bottleneck_mbps, "before", args.output_tag)
+        ingress_pcap = case_dir / "raw" / "pcaps" / f"ingress_before_bottleneck_{args.output_tag}.pcap"
+        egress_pcap = case_dir / "raw" / "pcaps" / f"egress_after_bottleneck_{args.output_tag}.pcap"
+        ingress_tcpdump = start_root_tcpdump(ingress_iface, ingress_pcap, case_dir / "raw" / "tcpdump" / f"ingress_{args.output_tag}.log")
+        egress_tcpdump = start_root_tcpdump(egress_iface, egress_pcap, case_dir / "raw" / "tcpdump" / f"egress_{args.output_tag}.log")
         time.sleep(0.5)
-        iperf_server = run_host_background(h2, ["iperf3", "-s", "-p", "5201"], case_dir / "logs" / "iperf_server_20260610.log")
+        iperf_server = run_host_background(h2, ["iperf3", "-s", "-p", "5201"], case_dir / "logs" / f"iperf_server_{args.output_tag}.log")
         procs.append(iperf_server)
         time.sleep(0.5)
         case_start_epoch_ns = time.time_ns()
@@ -1028,10 +1198,15 @@ def run_real_case(args: argparse.Namespace, case_dir: Path, metadata: dict[str, 
         if not args.disable_tcp_info:
             tcp_info_collector = start_tcp_info_collector(h1, args, case_dir, case_start_epoch_ns)
             procs.append(tcp_info_collector)
+        iperf_command: list[Any] = ["iperf3", "-c", "10.0.0.2", "-p", "5201", "-t", int(args.duration_sec), "-P", "1", "-i", "1", "-J"]
+        if args.tcp_target_mbps:
+            iperf_command.extend(["-b", f"{args.tcp_target_mbps}M"])
+        if args.tcp_pacing_timer_us:
+            iperf_command.extend(["--pacing-timer", str(args.tcp_pacing_timer_us)])
         iperf_client = run_host_background(
             h1,
-            ["iperf3", "-c", "10.0.0.2", "-p", "5201", "-t", int(args.duration_sec), "-i", "1", "-J"],
-            case_dir / "raw" / "iperf" / "iperf_client_20260610.json",
+            iperf_command,
+            case_dir / "raw" / "iperf" / f"iperf_client_{args.output_tag}.json",
         )
         procs.append(iperf_client)
         experiment_start_wall = time.time()
@@ -1047,7 +1222,9 @@ def run_real_case(args: argparse.Namespace, case_dir: Path, metadata: dict[str, 
             except Exception:
                 pass
         time.sleep(1.0)
+        tc_state_after = collect_tc_qdisc_state([ingress_iface, egress_iface], case_dir, args.bottleneck_mbps, "after", args.output_tag)
         write_real_pulses_from_sender_logs(case_dir, args, experiment_start_wall)
+        shaping_summary = tc_state_after.get("interfaces", {}).get(ingress_iface, {})
         metadata.update(
             {
                 "mode": "real-mininet",
@@ -1062,6 +1239,17 @@ def run_real_case(args: argparse.Namespace, case_dir: Path, metadata: dict[str, 
                 "case_start_epoch_ns": case_start_epoch_ns,
                 "case_start_monotonic_ns": case_start_monotonic_ns,
                 "offload_settings": offload_settings,
+                "shaping_interface": ingress_iface,
+                "configured_bottleneck_mbps": args.bottleneck_mbps,
+                "qdisc_kind": shaping_summary.get("qdisc_kind", ""),
+                "qdisc_rate": shaping_summary.get("qdisc_rate", ""),
+                "qdisc_dropped_packets": shaping_summary.get("qdisc_dropped_packets", 0),
+                "qdisc_overlimits": shaping_summary.get("qdisc_overlimits", 0),
+                "qdisc_requeues": shaping_summary.get("qdisc_requeues", 0),
+                "qdisc_backlog": shaping_summary.get("backlog", ""),
+                "qdisc_configuration": qdisc_config,
+                "tc_qdisc_state_before": tc_state_before,
+                "tc_qdisc_state_after": tc_state_after,
                 "rto_observation_source": "ss_tcp_info" if not args.disable_tcp_info else "",
             }
         )
@@ -1090,14 +1278,14 @@ def main() -> int:
             run_synthetic_case(args, case_dir, metadata)
         else:
             run_real_case(args, case_dir, metadata)
-        write_metadata(case_dir, metadata)
+        write_metadata(case_dir, metadata, args.output_tag)
         print(f"case complete: {args.case_id}")
         return 0
     except Exception as exc:
         metadata.setdefault("mode", "unknown")
         metadata["status"] = "failed"
         metadata["error_message"] = str(exc)
-        write_metadata(case_dir, metadata)
+        write_metadata(case_dir, metadata, args.output_tag)
         print(f"case failed: {args.case_id}: {exc}", file=sys.stderr)
         return 1
 

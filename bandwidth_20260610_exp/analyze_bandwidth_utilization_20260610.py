@@ -134,7 +134,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attacker-ips", nargs="*", default=["10.0.0.3", "10.0.0.4"])
     parser.add_argument("--iperf-port", type=int, default=5201)
     parser.add_argument("--attack-udp-port", type=int, default=5001)
-    parser.add_argument("--pcap-length-source", choices=["ethernet", "payload"], default="ethernet")
+    parser.add_argument("--pcap-length-source", choices=["ip", "ethernet", "payload"], default="ip")
     return parser.parse_args()
 
 
@@ -196,42 +196,72 @@ def read_synthetic_packet_rows(case_dir: Path) -> list[dict[str, Any]]:
         return list(csv.DictReader(f))
 
 
-TCPDUMP_RE = re.compile(
-    r"^(?P<ts>\d+(?:\.\d+)?)\s+.*?(?:length\s+(?P<eth_len>\d+):\s+)?"
-    r"IP\s+(?P<src_ip>\d+\.\d+\.\d+\.\d+)\.(?P<src_port>\d+)\s+>\s+"
-    r"(?P<dst_ip>\d+\.\d+\.\d+\.\d+)\.(?P<dst_port>\d+):\s+"
+TCPDUMP_HEADER_RE = re.compile(
+    r"^(?P<ts>\d+(?:\.\d+)?)\s+"
+    r".*?ethertype IPv4 \(0x0800\), length (?P<eth_len>\d+):\s+"
+    r"\(.*?proto (?P<proto>[A-Z0-9]+) \((?P<proto_num>\d+)\), length (?P<ip_len>\d+)\)"
+)
+TCPDUMP_DETAIL_RE = re.compile(
+    r"^\s+(?P<src_ip>\d+\.\d+\.\d+\.\d+)"
+    r"(?:\.(?P<src_port>\d+))?\s+>\s+"
+    r"(?P<dst_ip>\d+\.\d+\.\d+\.\d+)"
+    r"(?:\.(?P<dst_port>\d+))?:\s+"
     r"(?P<body>.*?)(?:,\s+length\s+(?P<payload_len>\d+))?$"
 )
 
 
-def parse_tcpdump_line(line: str, length_source: str) -> dict[str, Any] | None:
-    match = TCPDUMP_RE.match(line.strip())
-    if not match:
-        return None
-    body = match.group("body")
-    proto = "UDP" if "UDP" in body else "TCP"
-    payload_len = safe_int(match.group("payload_len"), 0)
-    eth_len = safe_int(match.group("eth_len"), 0)
-    return {
-        "timestamp_sec": safe_float(match.group("ts")),
-        "proto": proto,
-        "src_ip": match.group("src_ip"),
-        "dst_ip": match.group("dst_ip"),
-        "src_port": safe_int(match.group("src_port")),
-        "dst_port": safe_int(match.group("dst_port")),
-        "payload_bytes": payload_len,
-        "wire_bytes": eth_len if length_source == "ethernet" and eth_len > 0 else payload_len,
-    }
+def parse_tcpdump_records(lines: Iterable[str], length_source: str, time_origin_sec: float) -> Iterable[dict[str, Any]]:
+    pending: dict[str, Any] | None = None
+    for line in lines:
+        header = TCPDUMP_HEADER_RE.match(line.rstrip())
+        if header:
+            pending = {
+                "timestamp_sec": safe_float(header.group("ts")) - time_origin_sec,
+                "eth_len": safe_int(header.group("eth_len")),
+                "ip_len": safe_int(header.group("ip_len")),
+                "proto": header.group("proto").upper(),
+            }
+            continue
+        if pending is None:
+            continue
+        detail = TCPDUMP_DETAIL_RE.match(line.rstrip())
+        if not detail:
+            continue
+        body = detail.group("body")
+        proto = pending["proto"]
+        if "UDP" in body:
+            proto = "UDP"
+        elif "Flags" in body:
+            proto = "TCP"
+        payload_len = safe_int(detail.group("payload_len"), 0)
+        if length_source == "ethernet":
+            byte_count = pending["eth_len"]
+        elif length_source == "payload":
+            byte_count = payload_len
+        else:
+            byte_count = pending["ip_len"]
+        yield {
+            "timestamp_sec": pending["timestamp_sec"],
+            "proto": proto,
+            "src_ip": detail.group("src_ip"),
+            "dst_ip": detail.group("dst_ip"),
+            "src_port": safe_int(detail.group("src_port")),
+            "dst_port": safe_int(detail.group("dst_port")),
+            "payload_bytes": payload_len,
+            "wire_bytes": byte_count,
+        }
+        pending = None
 
 
 def read_pcap_packet_rows(
     pcap_path: Path,
     capture: str,
+    metadata: dict[str, Any],
     args: argparse.Namespace,
 ) -> list[dict[str, Any]]:
     if not pcap_path.exists():
         return []
-    command = ["tcpdump", "-tt", "-e", "-n", "-r", str(pcap_path)]
+    command = ["tcpdump", "-tt", "-e", "-n", "-vv", "-r", str(pcap_path), "ip"]
     try:
         proc = subprocess.run(command, text=True, capture_output=True, check=False)
     except FileNotFoundError:
@@ -240,14 +270,17 @@ def read_pcap_packet_rows(
         raise RuntimeError(f"tcpdump failed for {pcap_path}: {proc.stderr.strip()}")
 
     rows: list[dict[str, Any]] = []
-    for line in proc.stdout.splitlines():
-        packet = parse_tcpdump_line(line, args.pcap_length_source)
-        if not packet:
+    time_origin_sec = safe_float(metadata.get("experiment_start_wall"), math.nan)
+    if math.isnan(time_origin_sec):
+        time_origin_sec = safe_float(metadata.get("case_start_epoch_ns"), 0.0) / 1_000_000_000.0
+    receiver_ip = str(metadata.get("receiver_ip", args.receiver_ip))
+    for packet in parse_tcpdump_records(proc.stdout.splitlines(), args.pcap_length_source, time_origin_sec):
+        if capture == "egress" and packet["dst_ip"] != receiver_ip:
             continue
         packet_class = classify_packet(
             packet,
             tcp_sender_ip=args.tcp_sender_ip,
-            receiver_ip=args.receiver_ip,
+            receiver_ip=receiver_ip,
             attacker_ips=args.attacker_ips,
             iperf_port=args.iperf_port,
             attack_udp_port=args.attack_udp_port,
@@ -272,9 +305,9 @@ def read_case_packet_rows(case_dir: Path, metadata: dict[str, Any], args: argpar
     ingress_pcap = metadata.get("capture_ingress_pcap")
     egress_pcap = metadata.get("capture_egress_pcap")
     if ingress_pcap:
-        rows.extend(read_pcap_packet_rows(Path(ingress_pcap), "ingress", args))
+        rows.extend(read_pcap_packet_rows(Path(ingress_pcap), "ingress", metadata, args))
     if egress_pcap:
-        rows.extend(read_pcap_packet_rows(Path(egress_pcap), "egress", args))
+        rows.extend(read_pcap_packet_rows(Path(egress_pcap), "egress", metadata, args))
     return rows
 
 
