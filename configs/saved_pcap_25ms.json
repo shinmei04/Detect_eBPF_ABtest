@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "kind": "saved_pcap_evaluation",
+  "entry": "exp/detector_25ms_20260714/run.py",
+  "args": [],
+  "expected_outputs": [
+    "detector_summary_25ms.csv",
+    "detector_report_25ms.md",
+    "run_config.json",
+    "detector_windows_base_25ms.csv",
+    "detector_windows_periodic_25ms.csv",
+    "detector_windows_random_packet_25ms.csv"
+  ]
+}

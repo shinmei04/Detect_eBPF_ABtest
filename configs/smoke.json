@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "kind": "synthetic_smoke",
+  "entry": "scripts/run_paper_reproduction_experiment.py",
+  "args": [
+    "--duration-sec",
+    "8",
+    "--bucket-ms",
+    "25",
+    "--period-ms",
+    "1000",
+    "--burst-ms",
+    "200",
+    "--burst-pkts-per-bucket",
+    "10",
+    "--window-sec",
+    "4",
+    "--step-sec",
+    "1",
+    "--seeds",
+    "1",
+    "--warmup-windows",
+    "2",
+    "--score-threshold",
+    "2",
+    "--min-packets-for-detection",
+    "10"
+  ],
+  "expected_outputs": [
+    "metrics_original_like.json",
+    "metrics_stat_matched.json",
+    "predictions_original_like.csv",
+    "predictions_stat_matched.csv",
+    "detector_reproduction_summary.md"
+  ]
+}
