@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bandwidth_metrics_20260610 import (
+from metrics import (
     aggregate_seed_stats,
     average_attack_rate_mbps,
     classify_packet,

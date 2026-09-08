@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+if [[ $# -eq 0 ]]; then
+  set -- "$@"
+fi
+
+exec "${PYTHON_BIN}" "${SCRIPT_DIR}/run.py" "$@"

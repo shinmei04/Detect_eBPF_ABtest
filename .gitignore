@@ -7,7 +7,9 @@ results/
 results_*/
 results_mininet_ab/
 experiment_archive_*/
+exp/*/out/
 local_experiment_workspace/
+experiments/archive_unused/local_experiment_workspace_legacy_*/
 *.pcap
 *.log
 *.tmp

@@ -22,7 +22,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-from analyze_tcp5_attack5_20260611 import (
+from analyze_tcp5_attack5 import (
     ATTACK_VALIDATION_FIELDS,
     DETECTOR_FIELDS,
     RTO_FIELDS,
@@ -39,7 +39,7 @@ from analyze_tcp5_attack5_20260611 import (
     validation_status,
     write_csv,
 )
-from bandwidth_metrics_20260610 import aggregate_seed_stats
+from metrics import aggregate_seed_stats
 
 
 CASE_FIELDS = [

@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from recompute_bandwidth_from_pcap_20260610 import (  # noqa: E402
+from recompute_bandwidth_from_pcap import (  # noqa: E402
     capacity_warning,
     classify_packet,
     mbps,

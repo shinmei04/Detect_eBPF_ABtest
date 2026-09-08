@@ -21,7 +21,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-from bandwidth_metrics_20260610 import aggregate_seed_stats, classify_packet
+from metrics import aggregate_seed_stats, classify_packet
 
 
 TIMESERIES_FIELDS = [

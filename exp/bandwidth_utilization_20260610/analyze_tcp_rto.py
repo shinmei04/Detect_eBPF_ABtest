@@ -22,7 +22,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-from bandwidth_metrics_20260610 import aggregate_seed_stats
+from metrics import aggregate_seed_stats
 
 
 TCP_INFO_TIMESERIES_FIELDS = [

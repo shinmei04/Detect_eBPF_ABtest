@@ -3,7 +3,7 @@
 Large experiment artifacts are kept out of Git and organized under:
 
 ```text
-local_experiment_workspace/
+experiments/archive_unused/local_experiment_workspace_legacy_20260709/
 ```
 
 ## Groups
@@ -47,14 +47,15 @@ logs/
 
 ## Current Maintained Code
 
-- `bandwidth_20260610_exp/`: 20260610/20260611 bandwidth, TCP5/Attack5, RTO calibration, pcap reanalysis.
+- `exp/bandwidth_utilization_20260610/`: 20260610/20260611 bandwidth, TCP5/Attack5, RTO calibration, pcap reanalysis.
 - `mininet_experiment/`: Mininet topology, traffic generators, and AB-style experiment entry points.
 - `src/`: detector, feature extraction, analysis, and plotting libraries.
 - `scripts/`: maintained utility launchers plus the local organizer.
 
 ## Notes
 
-- `local_experiment_workspace/` is intentionally ignored by Git.
+- `experiments/archive_unused/local_experiment_workspace_legacy_20260709/` is
+  intentionally ignored by Git.
 - Raw pcaps, large result trees, and run logs should stay local unless a small
   summary or compact ZIP is explicitly needed for sharing.
 - To re-run the organization step safely:

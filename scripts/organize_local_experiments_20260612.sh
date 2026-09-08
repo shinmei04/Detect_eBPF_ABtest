@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKSPACE="${ROOT_DIR}/local_experiment_workspace"
+WORKSPACE="${ROOT_DIR}/experiments/archive_unused/local_experiment_workspace_legacy_20260709"
 
 mkdir -p \
   "${WORKSPACE}/00_ab_throughput_tradeoff" \
@@ -24,7 +24,7 @@ move_if_exists() {
     if [[ -e "${dst_path}/$(basename "${src}")" || -L "${dst_path}/$(basename "${src}")" ]]; then
       echo "skip existing: ${dst}/$(basename "${src}")"
     else
-      echo "move: ${src} -> local_experiment_workspace/${dst}/"
+      echo "move: ${src} -> experiments/archive_unused/local_experiment_workspace_legacy_20260709/${dst}/"
       mv "${src_path}" "${dst_path}/"
     fi
   fi
@@ -59,10 +59,11 @@ move_if_exists "rto_calibration_grid_20260611_165912.log" "logs"
 move_if_exists "rto_calibration_grid_20260611_170800.log" "logs"
 
 cat > "${WORKSPACE}/README.md" <<'README'
-# Local Experiment Workspace
+# Local Experiment Workspace Legacy Archive
 
 This directory is intentionally ignored by Git.  It keeps large local
-experiment artifacts out of the repository root while preserving them on disk.
+experiment artifacts out of the repository root and out of current DPSWS result
+paths while preserving them on disk.
 
 ## Layout
 
@@ -76,7 +77,7 @@ experiment artifacts out of the repository root while preserving them on disk.
 
 Current maintained experiment code lives in:
 
-- `bandwidth_20260610_exp/`
+- `exp/bandwidth_utilization_20260610/`
 - `mininet_experiment/`
 - `src/`
 - `scripts/`

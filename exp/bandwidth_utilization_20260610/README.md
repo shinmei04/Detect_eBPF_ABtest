@@ -34,26 +34,26 @@ Smoke test on WSL/Ubuntu with Mininet:
 
 ```bash
 sudo -v
-sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh --smoke
+sudo ./exp/bandwidth_utilization_20260610/run.sh --smoke
 ```
 
 Local/dry smoke test without Mininet:
 
 ```bash
-./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh --smoke --synthetic-test
+./exp/bandwidth_utilization_20260610/run.sh --smoke --synthetic-test
 ```
 
 Focused experiment:
 
 ```bash
 sudo -v
-sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh --focused
+sudo ./exp/bandwidth_utilization_20260610/run.sh --focused
 ```
 
 Useful overrides:
 
 ```bash
-sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
+sudo ./exp/bandwidth_utilization_20260610/run.sh \
   --focused \
   --bottleneck-mbps 15 \
   --period-ms 1000 \
@@ -168,7 +168,7 @@ Example: 50% minus 36% is 14 percentage points.
 Each run creates:
 
 ```text
-results_bandwidth_20260610_YYYYMMDD_HHMMSS/
+out/YYYYMMDD_HHMMSS/
   cases/
   csv/
   figures/
@@ -206,7 +206,7 @@ under `experiment_archive_20260610/recomputed_ip/`:
 ```bash
 mkdir -p experiment_archive_20260610/{recomputed_l2,recomputed_ip,reports,manifests}
 ln -sfn ../results_bandwidth_20260610_20260610_142643 experiment_archive_20260610/original_focused
-python3 bandwidth_20260610_exp/recompute_bandwidth_from_pcap_20260610.py \
+python3 exp/bandwidth_utilization_20260610/recompute_bandwidth_from_pcap.py \
   --results-dir results_bandwidth_20260610_20260610_142643 \
   --output-dir experiment_archive_20260610/recomputed_ip \
   --l2-output-dir experiment_archive_20260610/recomputed_l2 \
@@ -298,7 +298,7 @@ tcp_info_interval_ms = 50
 The interval is configurable:
 
 ```bash
-sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
+sudo ./exp/bandwidth_utilization_20260610/run.sh \
   --focused \
   --tcp-info-interval-ms 100
 ```
@@ -403,7 +403,7 @@ interfaces when `ethtool` is available.  It does not disable offloads by
 default.  To disable TSO/GSO/GRO for the capture interfaces:
 
 ```bash
-sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
+sudo ./exp/bandwidth_utilization_20260610/run.sh \
   --focused \
   --disable-offloads
 ```
@@ -421,7 +421,7 @@ s2-side post-bottleneck pcap, receiver direction only, using IPv4 total length.
 Smoke:
 
 ```bash
-sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
+sudo ./exp/bandwidth_utilization_20260610/run.sh \
   --tcp5-attack5-smoke \
   --existing-repo-dir "$PWD"
 ```
@@ -429,7 +429,7 @@ sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
 Focused, to run only after smoke passes:
 
 ```bash
-sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
+sudo ./exp/bandwidth_utilization_20260610/run.sh \
   --tcp5-attack5-focused \
   --existing-repo-dir "$PWD"
 ```
@@ -513,7 +513,7 @@ burst_ms = 1000 * 5 / peak
 Smoke runs only `peak=30 Mbps, queue=100 packets`:
 
 ```bash
-sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
+sudo ./exp/bandwidth_utilization_20260610/run.sh \
   --rto-calibration-smoke \
   --existing-repo-dir "$PWD"
 ```
@@ -521,7 +521,7 @@ sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
 Run the full 12-condition grid only after smoke passes:
 
 ```bash
-sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh \
+sudo ./exp/bandwidth_utilization_20260610/run.sh \
   --rto-calibration-grid \
   --existing-repo-dir "$PWD"
 ```

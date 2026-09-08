@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from analyze_tcp_rto_20260610 import detect_rto_events, extract_rto_episodes, nearest_pulse_metrics, overlaps_pulse
+from analyze_tcp_rto import detect_rto_events, extract_rto_episodes, nearest_pulse_metrics, overlaps_pulse
 
 
 def row(t: float, backoff: int, retransmits: int = 0, total_retrans: int = 0) -> dict[str, object]:

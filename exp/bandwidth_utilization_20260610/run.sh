@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ORIGINAL_ARGS=("$@")
 
 MODE="focused"
@@ -47,9 +47,9 @@ Created: 2026-06-10
 Purpose: 25 ms detector window comparison experiment.
 
 Usage:
-  sudo ./run_ldos_bandwidth_grid_20260610.sh --smoke
-  sudo ./run_ldos_bandwidth_grid_20260610.sh --focused
-  ./run_ldos_bandwidth_grid_20260610.sh --smoke --synthetic-test
+  sudo ./run.sh --smoke
+  sudo ./run.sh --focused
+  ./run.sh --smoke --synthetic-test
 
 Options:
   --smoke                         Run 1 seed, 1 condition, all scenarios, short duration.
@@ -297,15 +297,7 @@ if [[ ${#SEED_VALUES[@]} -eq 0 ]]; then
 fi
 
 if [[ -z "${OUTPUT_DIR}" ]]; then
-  if [[ "${TCP5_ATTACK5_MODE}" -eq 1 ]]; then
-    if [[ "${RTO_CALIBRATION_MODE}" -eq 1 ]]; then
-      OUTPUT_DIR="${REPO_ROOT}/results_rto_calibration_20260611_$(date +%Y%m%d_%H%M%S)"
-    else
-      OUTPUT_DIR="${REPO_ROOT}/results_tcp5_attack5_20260611_$(date +%Y%m%d_%H%M%S)"
-    fi
-  else
-    OUTPUT_DIR="${REPO_ROOT}/results_bandwidth_20260610_$(date +%Y%m%d_%H%M%S)"
-  fi
+  OUTPUT_DIR="${SCRIPT_DIR}/out/$(date +%Y%m%d_%H%M%S)"
 fi
 
 if [[ -x "${EXISTING_REPO_DIR}/.venv/bin/python" ]]; then
@@ -365,8 +357,8 @@ import csv
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bandwidth_metrics_20260610 import average_attack_rate_mbps, configured_average_attack_pct, focused_conditions
+sys.path.insert(0, str(Path.cwd()))
+from metrics import average_attack_rate_mbps, configured_average_attack_pct, focused_conditions
 
 out_dir = Path(sys.argv[1])
 bottleneck = float(sys.argv[2])
@@ -499,7 +491,7 @@ run_case() {
   local queue_packets="${9:-}"
   local case_id="${condition_id}_${scenario}_seed${seed}_${OUTPUT_TAG}"
   local args=(
-    "${PYTHON_BIN}" "${SCRIPT_DIR}/run_ldos_bandwidth_experiment_20260610.py"
+    "${PYTHON_BIN}" "${SCRIPT_DIR}/run.py"
     --output-dir "${OUTPUT_DIR}"
     --case-id "${case_id}"
     --scenario "${scenario}"
@@ -621,6 +613,7 @@ PY
 
 if [[ "${RTO_CALIBRATION_MODE}" -eq 1 ]]; then
   for line in "${CONDITION_LINES[@]}"; do
+    line="${line%$'\r'}"
     IFS=',' read -r condition_id peak_multiplier duty_ratio peak_rate burst_ms period_ms avg_attack avg_pct queue_packets <<<"${line}"
     for seed in "${SEED_VALUES[@]}"; do
       baseline_case_id="${condition_id}_no_attack_seed${seed}_${OUTPUT_TAG}"
@@ -656,6 +649,7 @@ else
   done
 
   for line in "${CONDITION_LINES[@]}"; do
+    line="${line%$'\r'}"
     IFS=',' read -r condition_id peak_multiplier duty_ratio peak_rate burst_ms period_ms avg_attack avg_pct queue_packets <<<"${line}"
     for seed in "${VALID_SEEDS[@]}"; do
       for scenario in "${SCENARIOS[@]}"; do
@@ -671,7 +665,7 @@ if [[ ${#FAILED_CASES[@]} -gt 0 ]]; then
 fi
 
 if [[ "${RTO_CALIBRATION_MODE}" -eq 1 ]]; then
-  "${PYTHON_BIN}" "${SCRIPT_DIR}/analyze_rto_calibration_20260611.py" \
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/analyze_rto_calibration.py" \
     --results-dir "${OUTPUT_DIR}" \
     --bucket-ms "${BUCKET_MS}" \
     --bottleneck-mbps "${BOTTLENECK_MBPS}" \
@@ -682,7 +676,7 @@ if [[ "${RTO_CALIBRATION_MODE}" -eq 1 ]]; then
     --output-tag "${OUTPUT_TAG}" \
     --mode "${MODE}"
 elif [[ "${TCP5_ATTACK5_MODE}" -eq 1 ]]; then
-  "${PYTHON_BIN}" "${SCRIPT_DIR}/analyze_tcp5_attack5_20260611.py" \
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/analyze_tcp5_attack5.py" \
     --results-dir "${OUTPUT_DIR}" \
     --bucket-ms "${BUCKET_MS}" \
     --bottleneck-mbps "${BOTTLENECK_MBPS}" \
@@ -693,24 +687,24 @@ elif [[ "${TCP5_ATTACK5_MODE}" -eq 1 ]]; then
     --output-tag "${OUTPUT_TAG}" \
     --mode "${MODE}"
 else
-  "${PYTHON_BIN}" "${SCRIPT_DIR}/analyze_bandwidth_utilization_20260610.py" \
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/analyze.py" \
     --results-dir "${OUTPUT_DIR}" \
     --bucket-ms "${BUCKET_MS}" \
     --bottleneck-mbps "${BOTTLENECK_MBPS}"
 
-  "${PYTHON_BIN}" "${SCRIPT_DIR}/analyze_tcp_rto_20260610.py" \
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/analyze_tcp_rto.py" \
     --results-dir "${OUTPUT_DIR}" \
     --rto-causal-window-ms "${RTO_CAUSAL_WINDOW_MS}" \
     --period-ms "${PERIOD_MS}"
 
-  "${PYTHON_BIN}" "${SCRIPT_DIR}/plot_bandwidth_utilization_20260610.py" \
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/plot_bandwidth.py" \
     --input-dir "${OUTPUT_DIR}/csv" \
     --output-dir "${OUTPUT_DIR}/figures" \
     --results-dir "${OUTPUT_DIR}" \
     --bottleneck-mbps "${BOTTLENECK_MBPS}" \
     --attack-start-sec "${ATTACK_START_SEC}"
 
-  "${PYTHON_BIN}" "${SCRIPT_DIR}/plot_tcp_rto_20260610.py" \
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/plot_tcp_rto.py" \
     --input-dir "${OUTPUT_DIR}/csv" \
     --output-dir "${OUTPUT_DIR}/figures" \
     --bottleneck-mbps "${BOTTLENECK_MBPS}"
@@ -783,5 +777,5 @@ echo "LDoS bandwidth pipeline finished: $(date '+%Y-%m-%dT%H:%M:%S%z')"
 echo "Output directory: ${OUTPUT_DIR}"
 if [[ "${MODE}" == "tcp5_attack5_smoke" ]]; then
   echo "Smoke completed. Focused command:"
-  echo "sudo ./bandwidth_20260610_exp/run_ldos_bandwidth_grid_20260610.sh --tcp5-attack5-focused --existing-repo-dir \"${EXISTING_REPO_DIR}\""
+  echo "sudo ./exp/bandwidth_utilization_20260610/run.sh --tcp5-attack5-focused --existing-repo-dir \"${EXISTING_REPO_DIR}\""
 fi

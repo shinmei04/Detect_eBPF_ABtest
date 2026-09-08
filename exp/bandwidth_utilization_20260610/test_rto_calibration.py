@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from analyze_rto_calibration_20260611 import (  # noqa: E402
+from analyze_rto_calibration import (  # noqa: E402
     build_case_and_validation_rows,
     parse_qdisc_text,
     ranking,

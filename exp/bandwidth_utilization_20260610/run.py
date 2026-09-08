@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from bandwidth_metrics_20260610 import (
+from metrics import (
     DEFAULT_BOTTLENECK_MBPS,
     average_attack_rate_mbps,
     configured_average_attack_pct,
@@ -842,7 +842,7 @@ def start_tcp_info_collector(host: Any, args: argparse.Namespace, case_dir: Path
         host,
         [
             sys.executable,
-            str(Path(__file__).resolve().with_name("collect_tcp_rto_20260610.py")),
+            str(Path(__file__).resolve().with_name("collect_tcp_rto.py")),
             "--case-id",
             args.case_id,
             "--scenario",
@@ -948,7 +948,7 @@ def run_attack_sender(host: Any, args: argparse.Namespace, case_dir: Path, exist
             host,
             [
                 sys.executable,
-                str(Path(__file__).resolve().with_name("send_constant_udp_20260610.py")),
+                str(Path(__file__).resolve().with_name("send_constant_udp.py")),
                 "--dst-ip",
                 "10.0.0.2",
                 "--dst-port",
