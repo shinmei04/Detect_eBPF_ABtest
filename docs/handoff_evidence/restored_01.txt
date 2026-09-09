@@ -1,0 +1,19 @@
+test_default_matches_original_commit_all_existing_columns (test_research_analysis.DetectorTests.test_default_matches_original_commit_all_existing_columns) ... ok
+test_exact_score_two_and_lower_zero (test_research_analysis.DetectorTests.test_exact_score_two_and_lower_zero) ... ok
+test_freeze_same_initial_state_no_updates_and_gate (test_research_analysis.DetectorTests.test_freeze_same_initial_state_no_updates_and_gate) ... ok
+test_invalid_training_rejected (test_research_analysis.DetectorTests.test_invalid_training_rejected) ... ok
+test_corrupt_pcap_does_not_become_empty_benign (test_research_analysis.IntegrationTests.test_corrupt_pcap_does_not_become_empty_benign) ... ok
+test_fixture_cli_reproducibility_and_25ms_4s_replay (test_research_analysis.IntegrationTests.test_fixture_cli_reproducibility_and_25ms_4s_replay) ... ok
+test_bad_packet_input (test_research_analysis.LabelMetricTests.test_bad_packet_input) ... ok
+test_empty_windows_boundaries_and_multiple_events (test_research_analysis.LabelMetricTests.test_empty_windows_boundaries_and_multiple_events) ... ok
+test_latency_transition_no_future_detection (test_research_analysis.LabelMetricTests.test_latency_transition_no_future_detection) ... ok
+test_metrics_hand_computed_end_time_and_miss (test_research_analysis.LabelMetricTests.test_metrics_hand_computed_end_time_and_miss) ... ok
+test_constant_and_insufficient_are_undefined (test_research_analysis.TemporalTests.test_constant_and_insufficient_are_undefined) ... ok
+test_fixed_rules_require_calibration_and_handle_missing (test_research_analysis.TemporalTests.test_fixed_rules_require_calibration_and_handle_missing) ... ok
+test_periodic_jitter_equivalence_and_no_false_start (test_research_analysis.TemporalTests.test_periodic_jitter_equivalence_and_no_false_start) ... ok
+test_temporal_is_causal_and_ready_only_after_full_history (test_research_analysis.TemporalTests.test_temporal_is_causal_and_ready_only_after_full_history) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 0.908s
+
+OK

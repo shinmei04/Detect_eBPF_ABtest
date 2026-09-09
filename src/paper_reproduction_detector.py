@@ -107,7 +107,7 @@ class PaperReproductionDetector:
                 for feature in XDP_FEATURE_CONFIGS
             }
 
-    def predict_stream(self, features: pd.DataFrame) -> pd.DataFrame:
+    def predict_stream(self, features: pd.DataFrame, *, update_thresholds: bool = True) -> pd.DataFrame:
         """Predict a stream of ordered window features."""
         missing = [feature for feature in PAPER_FEATURES if feature not in features.columns]
         if missing:
@@ -117,10 +117,10 @@ class PaperReproductionDetector:
 
         rows: list[dict[str, object]] = []
         for _, row in features.iterrows():
-            rows.append(self._predict_one(row))
+            rows.append(self._predict_one(row, update_thresholds=update_thresholds))
         return pd.DataFrame(rows)
 
-    def _predict_one(self, row: pd.Series) -> dict[str, object]:
+    def _predict_one(self, row: pd.Series, *, update_thresholds: bool = True) -> dict[str, object]:
         """Evaluate one window, update EMA state, and return detector fields."""
         output = row.to_dict()
         enough_packets = int(row["total_packets"]) >= self.config.min_packets_for_detection
@@ -138,6 +138,7 @@ class PaperReproductionDetector:
             state = self.states[feature_name]
             value = float(row[feature_name])
             threshold = self._threshold(feature_config, state)
+            raw_crossed = value > threshold if feature_config.is_upper_threshold else value < threshold
             is_suspicious = False
             if enough_packets and detection_enabled:
                 if feature_config.is_upper_threshold:
@@ -151,6 +152,15 @@ class PaperReproductionDetector:
             output[f"{feature_name}_sigma"] = state.sigma
             output[f"{feature_name}_threshold"] = threshold
             output[f"{feature_name}_is_suspicious"] = bool(is_suspicious)
+            output[f"{feature_name}_raw_crossed"] = bool(raw_crossed)
+            output[f"{feature_name}_direction"] = "upper" if feature_config.is_upper_threshold else "lower"
+            output[f"{feature_name}_margin"] = value - threshold if feature_config.is_upper_threshold else threshold - value
+            updated = update_thresholds and enough_packets and (not is_suspicious or not detection_enabled)
+            output[f"{feature_name}_updated"] = bool(updated)
+            output[f"{feature_name}_update_reason"] = (
+                "frozen" if not update_thresholds else "insufficient_packets" if not enough_packets
+                else "warmup" if not detection_enabled else "suspicious" if is_suspicious else "normal"
+            )
 
         attack_detected = bool(enough_packets and detection_enabled and suspicious_score >= self.config.suspicious_threshold)
         if attack_detected:
@@ -167,7 +177,7 @@ class PaperReproductionDetector:
 
         if enough_packets:
             for feature_name in PAPER_FEATURES:
-                if not suspicious_by_feature[feature_name] or not detection_enabled:
+                if update_thresholds and (not suspicious_by_feature[feature_name] or not detection_enabled):
                     self._update_feature(feature_name, float(row[feature_name]))
             self.total_windows_processed += 1
 

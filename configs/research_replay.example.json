@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "synthetic": false,
+  "input_scope": "udp_dst_port",
+  "time_origin_description": "REPLACE: recorded run start_epoch in the same clock as each PCAP; conversion metadata retained",
+  "bucket_ms": 25,
+  "window_sec": 0.025,
+  "step_sec": 0.025,
+  "detector": {"warmup_windows": 20, "min_packets_for_detection": 10},
+  "enable_temporal": true,
+  "temporal": {"window_sec": 4, "burst_threshold_packets": 5, "min_intervals": 3, "min_period_sec": 0.1, "max_period_sec": 3},
+  "temporal_rules": {},
+  "training": {"packets_csv": "train.csv", "duration_sec": 60, "label": "benign"},
+  "cases": [
+    {"id": "baseline_seed1", "scenario": "baseline", "seed": 1, "packets_csv": "baseline.csv", "duration_sec": 60, "attack_intervals": [], "conditions": {"note": "UDP-only baseline cannot measure TCP FPR"}},
+    {"id": "random_seed2", "scenario": "random_microburst", "seed": 2, "packets_csv": "random.csv", "duration_sec": 60, "attack_intervals": [], "conditions": {"note": "Use an independent seed from training; record actual schedule and measured load"}},
+    {"id": "periodic_benign_seed3", "scenario": "benign_periodic", "seed": 3, "packets_csv": "benign_periodic.csv", "duration_sec": 60, "attack_intervals": [], "conditions": {"note": "Require legitimate application/traffic provenance; do not derive labels from periodicity"}},
+    {"id": "ldos_seed4", "scenario": "periodic_ldos", "seed": 4, "packets_csv": "ldos.csv", "duration_sec": 60, "attack_intervals": [[10, 50]], "conditions": {"period_sec": 1, "burst_duration_sec": 0.3, "peak_rate_mbps": 15, "nominal_average_rate_mbps": 4.5, "payload_bytes": null, "flow_count": null, "jitter_ratio": 0, "start_time_sec": 10, "note": "Example manuscript rate/timing only. Replace all fields with recovered case metadata; payload and flow count unresolved."}}
+  ]
+}

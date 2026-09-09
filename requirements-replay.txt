@@ -1,0 +1,3 @@
+# Validated offline replay dependencies (Python 3.12).
+numpy==2.3.5
+pandas==2.2.3

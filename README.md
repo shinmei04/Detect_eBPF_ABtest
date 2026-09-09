@@ -1,5 +1,19 @@
 # ldos_stat_matched_phase1
 
+## 現在の研究と実験PCへの引渡し
+
+研究方針の入口は [AGENTS.md](AGENTS.md)、現在の優先作業は [Current Phase](docs/current_phase.md)、引渡しは [HANDOFF.md](docs/HANDOFF.md) を参照してください。5文書はこのGitリポジトリ内にあります。
+
+以下の旧説明にあるPhase番号・固定1 Hzの人工比較・過去の絶対パスは歴史的な実装説明です。現在のPhase 1/2と混同せず、実行は引渡し手順から開始してください。
+
+## 2026-09: 原因分析と単純baseline比較
+
+現行detector互換のオフライン分析基盤を追加しました。
+[調査結果](docs/REPOSITORY_AUDIT.md)、[分析手順・入力契約](docs/RESEARCH_ANALYSIS.md)、
+[実験PC向け計画](EXPERIMENT_PLAN.md)、[研究ログ](RESEARCH_LOG.md)、[新規性候補](NOVELTY_NOTES.md)を参照してください。
+25 ms bucketと判定windowは別設定です。現行再現器は窓全体の集計であり、5-tupleごとの独立検知や元XDPの完全再現ではありません。
+Macでは実ネットワーク実験・長時間性能評価を実行しません。
+
 ## 実験の目的
 
 純粋なPythonシミュレーションで、周期的なLDoS bucket列と、非周期的な正常マイクロバーストbucket列を生成します。

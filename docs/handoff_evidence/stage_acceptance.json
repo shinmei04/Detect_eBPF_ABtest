@@ -1,0 +1,53 @@
+{
+  "synthetic": true,
+  "python": "3.12.14 (main, Aug 25 2026, 13:50:33) [Clang 22.1.3 ]",
+  "platform": "macOS-15.6.1-arm64-arm-64bit",
+  "cwd": "/private/tmp/ldos-handoff-work-20260909/implementation",
+  "commands": [
+    {
+      "argv": [
+        "/Users/niimi/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-v"
+      ],
+      "returncode": 0,
+      "log": "01.log"
+    },
+    {
+      "argv": [
+        "/Users/niimi/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+        "scripts/make_research_fixture.py",
+        "--output-dir",
+        "/private/tmp/ldos-handoff-work-20260909/smoke-stage/fixture",
+        "--peak-rate-mbps",
+        "0.05",
+        "--window-sec",
+        "0.025",
+        "--step-sec",
+        "0.025"
+      ],
+      "returncode": 0,
+      "log": "02.log"
+    },
+    {
+      "argv": [
+        "/Users/niimi/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+        "scripts/analyze_research.py",
+        "--config",
+        "/private/tmp/ldos-handoff-work-20260909/smoke-stage/fixture/config.json",
+        "--output-dir",
+        "/private/tmp/ldos-handoff-work-20260909/smoke-stage/analysis"
+      ],
+      "returncode": 0,
+      "log": "03.log"
+    }
+  ],
+  "status": "PASSED",
+  "numpy": "2.3.5",
+  "pandas": "2.2.3",
+  "limitation": "Synthetic offline smoke only; no real capture, network, plotting or performance validation"
+}

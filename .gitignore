@@ -11,3 +11,9 @@ results_mininet_ab/
 *.tmp
 
 .mininet_history
+
+# Machine role is local to each host; never transfer it from the Mac.
+machine_role.local.json
+/handoff_*/
+handoff_origin.json
+handoff_sha256.json

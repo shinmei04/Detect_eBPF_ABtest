@@ -133,7 +133,7 @@ def parse_udp_pcap(pcap_path: Path, dst_port: int = 5001) -> pd.DataFrame:
 
     command = [tcpdump, "-tt", "-nn", "-r", str(pcap_path), "udp"]
     completed = subprocess.run(command, check=False, text=True, capture_output=True)
-    if completed.returncode not in (0, 1):
+    if completed.returncode != 0:
         raise RuntimeError(f"tcpdump failed: {completed.stderr.strip()}")
 
     rows: list[dict[str, object]] = []
